@@ -1,0 +1,7 @@
+%% Multi-tenant membership: identity vs participation (DESIGN §6.1)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+erDiagram
+    USER ||--o{ MEMBERSHIP : "has (1 per tenant)"
+    TENANT ||--o{ MEMBERSHIP : "contains"
+    MEMBERSHIP }o--|| ORG_UNIT : "in (within that tenant)"
+    MEMBERSHIP }o--o{ ROLE : "membership_roles"

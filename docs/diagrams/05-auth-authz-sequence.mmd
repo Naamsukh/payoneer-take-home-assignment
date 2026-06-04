@@ -1,0 +1,47 @@
+%% Authentication & authorization sequence (DESIGN §8)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+sequenceDiagram
+    autonumber
+    participant U as User / UI
+    participant GW as API Gateway
+    participant A as Auth Service
+    participant E as Expense Svc (PEP)
+    participant P as Authz Svc (PDP)
+    participant C as Redis
+    participant DB as Postgres
+
+    Note over U,A: Authentication (global identity)
+    U->>GW: POST /auth/login {email, pwd}
+    GW->>A: forward
+    A->>DB: verify global credentials
+    A-->>U: identity token (no tenant) + memberships [{tenant, status}]
+    Note over U,A: Select active tenant (auto if only one)
+    U->>GW: POST /auth/select-tenant {tenant_id} (Bearer identity token)
+    GW->>A: forward
+    A->>DB: verify ACTIVE membership(user, tenant), load roles for that membership
+    A->>C: store refresh session (active_tenant_id)
+    A-->>U: access JWT {user_id, tenant_id, roles, membership_id, exp=15m} + refresh token
+
+    Note over U,P: Authorization (per request)
+    U->>GW: POST /expenses/{id}/approve (Bearer JWT)
+    GW->>GW: validate JWT sig + exp, extract tenant_id
+    GW->>E: forward + tenant context
+    E->>E: PEP: re-validate JWT, assert tenant match
+    E->>DB: load resource attrs (amount, dept, created_by)
+    E->>C: GET decision cache [hash(sub,action,res,policy_ver)]
+    alt cache hit
+      C-->>E: allow|deny
+    else cache miss
+      E->>P: POST /check {subject, action, resource_attrs, env}
+      P->>DB: resolve role graph + attached policies (RLS scoped)
+      P->>P: RBAC match -> ABAC eval -> deny-by-default
+      P->>DB: append audit_log
+      P-->>E: {decision, reason, policy_id}
+      E->>C: SET cache (TTL 15s)
+    end
+    alt allow
+      E->>DB: perform approval
+      E-->>U: 200 OK
+    else deny
+      E-->>U: 403 {reason}
+    end

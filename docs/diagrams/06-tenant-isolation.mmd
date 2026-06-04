@@ -1,0 +1,6 @@
+%% Multi-tenant isolation: defense in depth (DESIGN §9)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+flowchart TB
+    A[Layer 1 — Token<br/>JWT carries tenant_id; gateway & PEP reject mismatch] -->
+    B[Layer 2 — Application<br/>request-scoped tenant context; every query auto-scoped] -->
+    C[Layer 3 — Database RLS<br/>SET app.tenant_id per connection;<br/>policy: USING tenant_id = current_setting]

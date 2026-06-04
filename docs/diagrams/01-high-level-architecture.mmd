@@ -1,0 +1,45 @@
+%% High-level architecture (DESIGN §5)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+flowchart TB
+    subgraph Client
+      UI[Streamlit Admin UI]
+      EXT[API consumers / curl]
+    end
+
+    GW[API Gateway / Reverse Proxy<br/>terminate TLS, validate user JWT,<br/>inject tenant context]
+
+    subgraph Identity
+      AUTH[Auth Service<br/>login, JWT issue/refresh,<br/>user / tenant / role-assignment]
+    end
+
+    subgraph AuthZCore[Authorization Core]
+      PDP[Authorization Service / PDP<br/>RBAC + ABAC engine<br/>policy / role / permission CRUD]
+      AUDIT[Audit Logger]
+    end
+
+    subgraph BusinessSvcs[Sample Microservices]
+      EXP[Expense Service + PEP]
+      PAY[Payroll Service + PEP]
+      OTHERS[Reporting / Workflow /<br/>Notification / Invoice<br/>same pattern, designed]
+    end
+
+    DB[(PostgreSQL<br/>shared DB + RLS,<br/>tenant_id on every row)]
+    CACHE[(Redis<br/>decision cache + sessions)]
+
+    UI --> GW
+    EXT --> GW
+    GW --> AUTH
+    GW --> EXP
+    GW --> PAY
+    EXP -- POST /check --> PDP
+    PAY -- POST /check --> PDP
+    AUTH --> DB
+    AUTH --> CACHE
+    PDP --> DB
+    PDP --> CACHE
+    PDP --> AUDIT
+    AUDIT --> DB
+    EXP --> DB
+    PAY --> DB
+    UI -. manage roles/policies .-> PDP
+    UI -. manage users/tenants .-> AUTH

@@ -1,0 +1,6 @@
+%% Service-to-service security (DESIGN §10)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+flowchart LR
+    EXP[Expense Svc] -- "service JWT (svc=expense)" --> PDP[Authz Svc]
+    PAY[Payroll Svc] -- "service JWT (svc=payroll)" --> PDP
+    PDP -- "verify signature + svc claim" --> PDP

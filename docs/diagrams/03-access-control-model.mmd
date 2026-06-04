@@ -1,0 +1,16 @@
+%% Access control model: RBAC + ABAC (DESIGN §6)
+%% Source of truth: docs/DESIGN.md — regenerate images with `make diagrams`.
+flowchart LR
+    U[User] -->|assigned| R[Roles]
+    R -->|inherits| R
+    R -->|grant| P[Permissions<br/>service:resource:action]
+    P -.->|optional ABAC| POL[Policies<br/>condition + effect]
+    U -->|belongs to| OU[Org Unit]
+    subgraph Decision
+      direction TB
+      D1[1. Resolve effective permissions<br/>via role graph]
+      D2[2. Match service:resource:action]
+      D3[3. Evaluate attached ABAC policies]
+      D4[4. Explicit DENY wins, else ALLOW;<br/>default DENY]
+      D1-->D2-->D3-->D4
+    end
