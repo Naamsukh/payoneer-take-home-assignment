@@ -1,0 +1,113 @@
+# Shared environment for application services (all connect over the compose network).
+x-app-env: &app-env
+  APP_DATABASE_URL: postgresql+psycopg2://app_user:app_pass@postgres:5432/acp
+  IDENTITY_DATABASE_URL: postgresql+psycopg2://identity_user:identity_pass@postgres:5432/acp
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: dev-secret-change-me
+  SERVICE_JWT_SECRET: dev-service-secret-change-me
+  DECISION_CACHE_TTL: "15"
+  AUTH_URL: http://auth:8000
+  AUTHZ_URL: http://authz:8000
+  EXPENSE_URL: http://expense:8000
+  PAYROLL_URL: http://payroll:8000
+
+x-app-depends: &app-depends
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  bootstrap:
+    condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: acp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d acp"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: creates roles, schema, grants, RLS policies, then exits.
+  bootstrap:
+    build: .
+    command: python -m services.common.bootstrap
+    environment:
+      ADMIN_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/acp
+      APP_DB_PASSWORD: app_pass
+      IDENTITY_DB_PASSWORD: identity_pass
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot: populates demo tenants/users/roles/permissions/policies, then exits.
+  seed:
+    build: .
+    command: python -m services.common.seed
+    environment: *app-env
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  auth:
+    build: .
+    command: uvicorn services.auth.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8001:8000"
+    depends_on: *app-depends
+
+  authz:
+    build: .
+    command: uvicorn services.authz.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8002:8000"
+    depends_on: *app-depends
+
+  expense:
+    build: .
+    command: uvicorn services.expense.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8003:8000"
+    depends_on: *app-depends
+
+  payroll:
+    build: .
+    command: uvicorn services.payroll.main:app --host 0.0.0.0 --port 8000
+    environment: *app-env
+    ports:
+      - "8004:8000"
+    depends_on: *app-depends
+
+  ui:
+    build: .
+    command: streamlit run ui/app.py --server.port 8000 --server.address 0.0.0.0 --server.headless true
+    environment: *app-env
+    ports:
+      - "8510:8000"
+    depends_on: *app-depends
+
+volumes:
+  pgdata:
