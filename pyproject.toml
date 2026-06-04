@@ -1,0 +1,32 @@
+[project]
+name = "access-control-platform"
+version = "1.0.0"
+description = "Access Control Across Microservices in a Multi-Tenant Architecture"
+requires-python = ">=3.12"
+dependencies = [
+    # Web / services
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    "python-multipart==0.0.17",
+    "httpx==0.27.2",
+    # Data
+    "SQLAlchemy==2.0.36",
+    "psycopg2-binary==2.9.10",
+    "redis==5.2.0",
+    # Validation
+    "pydantic==2.10.2",
+    "pydantic-settings==2.6.1",
+    "email-validator==2.2.0",
+    # Security
+    "PyJWT==2.10.0",
+    "passlib==1.7.4",
+    "bcrypt==4.0.1",
+    # Admin UI
+    "streamlit==1.40.1",
+    "requests==2.32.3",
+    "pandas==2.2.3",
+]
+
+# Our own code is imported via PYTHONPATH (services.* namespace), not installed
+# as a distribution, so no build backend is declared and Docker uses
+# `uv sync --no-install-project`.
