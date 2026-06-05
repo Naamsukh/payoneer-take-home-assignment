@@ -14,9 +14,11 @@ sequenceDiagram
     U->>GW: POST /auth/login {email, pwd}
     GW->>A: forward
     A->>DB: verify global credentials
-    A-->>U: identity token (no tenant) + memberships [{tenant, status}]
-    Note over U,A: Select active tenant (auto if only one)
-    U->>GW: POST /auth/select-tenant {tenant_id} (Bearer identity token)
+    A->>DB: load memberships, pick the primary (first-joined) active membership
+    A->>C: store refresh session for the primary tenant
+    A-->>U: identity token + memberships + access JWT auto-scoped to primary tenant
+    Note over U,A: Switch tenant only when acting elsewhere (login already scoped)
+    U->>GW: POST /auth/switch-tenant {tenant_id} (Bearer identity/access token)
     GW->>A: forward
     A->>DB: verify ACTIVE membership(user, tenant), load roles for that membership
     A->>C: store refresh session (active_tenant_id)

@@ -414,7 +414,7 @@ sequenceDiagram
     U->>GW: POST /auth/login {email, pwd}
     GW->>A: forward
     A->>DB: verify global credentials
-    A->>DB: load memberships; pick PRIMARY (first-joined) active membership
+    A->>DB: load memberships, pick the primary (first-joined) active membership
     A->>C: store refresh session for the primary tenant
     A-->>U: identity token + memberships + access JWT auto-scoped to primary tenant
     Note over U,A: Switch tenant only when acting elsewhere (login already scoped)
