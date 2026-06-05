@@ -54,15 +54,23 @@ def bump_tenant_version(tenant_id: str) -> int:
 
 
 # --- Refresh sessions ---
+# The token handed to the client is a high-entropy secret; we store it HASHED at
+# rest (the Redis key is sha256(token)), so a dump of Redis never exposes a usable
+# refresh token. Lookup re-hashes the presented token — same pattern as a password
+# hash. (docs/DESIGN.md §13)
+def _refresh_key(session_id: str) -> str:
+    return "refresh:" + hashlib.sha256(session_id.encode()).hexdigest()
+
+
 def store_refresh(session_id: str, payload: dict[str, Any], ttl: int | None = None) -> None:
-    client().setex(f"refresh:{session_id}", ttl or settings.REFRESH_TTL_SECONDS,
+    client().setex(_refresh_key(session_id), ttl or settings.REFRESH_TTL_SECONDS,
                    json.dumps(payload, default=str))
 
 
 def get_refresh(session_id: str) -> dict[str, Any] | None:
-    raw = client().get(f"refresh:{session_id}")
+    raw = client().get(_refresh_key(session_id))
     return json.loads(raw) if raw else None
 
 
 def revoke_refresh(session_id: str) -> None:
-    client().delete(f"refresh:{session_id}")
+    client().delete(_refresh_key(session_id))

@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from libs.pep import PEP, Principal, get_principal
 from services.common.db import tenant_session
+from services.common.health import readiness
 
 from .models import Expense
 from .schemas import ExpenseCreate, ExpenseOut
@@ -36,8 +37,14 @@ def _to_out(e: Expense) -> ExpenseOut:
 
 @app.get("/healthz")
 def healthz():
-    """Liveness probe. No auth; returns the service identity."""
+    """Liveness probe (process up). No auth, no I/O."""
     return {"status": "ok", "service": "expense"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe — verifies Postgres + Redis are reachable (503 if not)."""
+    return readiness("expense")
 
 
 @app.post("/expenses", response_model=ExpenseOut)
@@ -62,15 +69,19 @@ def create_expense(body: ExpenseCreate, principal: Principal = Depends(get_princ
 
 
 @app.get("/expenses", response_model=list[ExpenseOut])
-def list_expenses(principal: Principal = Depends(get_principal)):
-    """List expenses in the caller's tenant.
+def list_expenses(limit: int = 50, offset: int = 0,
+                  principal: Principal = Depends(get_principal)):
+    """List expenses in the caller's tenant, paginated (limit capped at 200).
 
     RBAC (`expense:expense:read`) at the PDP; results are physically limited to the
     tenant by RLS (no explicit tenant filter needed). Auth: tenant-scoped token.
     """
     pep.enforce(principal, ACTION("read"))
     with tenant_session(principal.tenant_id) as session:
-        rows = session.execute(select(Expense).order_by(Expense.created_at.desc())).scalars().all()
+        rows = session.execute(
+            select(Expense).order_by(Expense.created_at.desc())
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         return [_to_out(e) for e in rows]
 
 

@@ -25,6 +25,7 @@ def _register_all_models() -> None:
     try:
         from services.expense import models as _exp  # noqa: F401
         from services.payroll import models as _pay  # noqa: F401
+        from services.invoice import models as _inv  # noqa: F401
     except ModuleNotFoundError:
         pass  # business services may not exist yet in early phases
 

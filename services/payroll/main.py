@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from libs.pep import PEP, Principal, get_principal
 from services.common.db import tenant_session
+from services.common.health import readiness
 
 from .models import Payslip
 from .schemas import PayslipCreate, PayslipOut
@@ -44,8 +45,14 @@ def _resource(p: Payslip) -> dict:
 
 @app.get("/healthz")
 def healthz():
-    """Liveness probe. No auth; returns the service identity."""
+    """Liveness probe (process up). No auth, no I/O."""
     return {"status": "ok", "service": "payroll"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe — verifies Postgres + Redis are reachable (503 if not)."""
+    return readiness("payroll")
 
 
 @app.post("/payslips", response_model=PayslipOut)
@@ -89,15 +96,21 @@ def get_payslip(payslip_id: uuid.UUID, principal: Principal = Depends(get_princi
 
 
 @app.get("/payslips", response_model=list[PayslipOut])
-def list_payslips(principal: Principal = Depends(get_principal)):
-    """List payslips with PER-ROW authorization.
+def list_payslips(limit: int = 50, offset: int = 0,
+                  principal: Principal = Depends(get_principal)):
+    """List payslips with PER-ROW authorization, paginated (limit capped at 200).
 
-    Loads the tenant's payslips (RLS-scoped), then asks the PDP for a decision per
-    row and returns only those the principal may read (own payslip, or any for a
-    payroll_admin). Auth: a tenant-scoped access token.
+    Loads a page of the tenant's payslips (RLS-scoped), then asks the PDP for a
+    decision per row and returns only those the principal may read (own payslip, or
+    any for a payroll_admin). NOTE: the per-row authorization filter is applied
+    AFTER the DB page, so a page may return fewer rows than `limit`. Auth: a
+    tenant-scoped access token.
     """
     with tenant_session(principal.tenant_id) as session:
-        rows = session.execute(select(Payslip).order_by(Payslip.period.desc())).scalars().all()
+        rows = session.execute(
+            select(Payslip).order_by(Payslip.period.desc())
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         payslips = [( _to_out(p), _resource(p)) for p in rows]
     visible = []
     for out, resource in payslips:

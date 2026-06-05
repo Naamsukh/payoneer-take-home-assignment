@@ -52,7 +52,8 @@ decision cache for low-latency enforcement at scale.
   imports: validate JWT → enforce tenant → ask the PDP → allow / 403.
 - **Expense** demonstrates ABAC (amount threshold, same org-unit,
   separation-of-duties); **Payroll** demonstrates sensitive-data RBAC + per-row
-  self-access.
+  self-access; **Invoice** is a third sample proving a new service plugs in with
+  zero core changes (imports the PEP, registers `invoice:*`, attaches a policy).
 - **Postgres RLS** is the last line of tenant isolation — even a buggy query
   cannot cross tenants.
 
@@ -74,6 +75,7 @@ make e2e       # run the end-to-end cross-service access-control test
 | Authz service (PDP/PAP) | http://localhost:8002/docs |
 | Expense service | http://localhost:8003/docs |
 | Payroll service | http://localhost:8004/docs |
+| Invoice service | http://localhost:8005/docs |
 
 > The UI is mapped to **8510** (the conventional 8501 was occupied on the build
 > machine). Change the `ui` port in `docker-compose.yml` if you prefer 8501.

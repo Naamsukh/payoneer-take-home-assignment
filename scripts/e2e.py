@@ -30,6 +30,7 @@ AUTH = os.environ.get("AUTH_URL", "http://localhost:8001")
 AUTHZ = os.environ.get("AUTHZ_URL", "http://localhost:8002")
 EXPENSE = os.environ.get("EXPENSE_URL", "http://localhost:8003")
 PAYROLL = os.environ.get("PAYROLL_URL", "http://localhost:8004")
+INVOICE = os.environ.get("INVOICE_URL", "http://localhost:8005")
 
 PASSWORD = "password"
 
@@ -89,6 +90,17 @@ def create_expense(token: str, amount: int, desc: str) -> dict:
 
 def approve_expense(token: str, expense_id: str) -> httpx.Response:
     return httpx.post(f"{EXPENSE}/expenses/{expense_id}/approve", headers=H(token))
+
+
+def create_invoice(token: str, customer: str, amount: int) -> dict:
+    r = httpx.post(f"{INVOICE}/invoices",
+                   json={"customer": customer, "amount": amount}, headers=H(token))
+    r.raise_for_status()
+    return r.json()
+
+
+def issue_invoice(token: str, invoice_id: str) -> httpx.Response:
+    return httpx.post(f"{INVOICE}/invoices/{invoice_id}/issue", headers=H(token))
 
 
 def create_payslip(token: str, employee_user_id: str, org_unit_id: str | None,
@@ -232,6 +244,31 @@ def scenario_authz_hardening() -> None:
           r["decision"] == "deny", r.get("reason"))
 
 
+def scenario_invoice() -> None:
+    print("\nInvoice — third sample service proves the platform generalises (RBAC + ABAC)")
+    carol, _ = access_token("carol@acme.com", "Acme Corp")    # employee, Engineering
+    bob, _ = access_token("bob@acme.com", "Acme Corp")         # manager, Engineering
+    dave, _ = access_token("dave@acme.com", "Acme Corp")       # employee, Sales
+
+    inv = create_invoice(carol, "Initech", 4000)
+    check("employee drafts invoice (RBAC allow)", inv["status"] == "draft")
+
+    # employee cannot issue (no invoice:issue) -> RBAC no_permission
+    r = issue_invoice(dave, inv["id"])
+    check("employee issue denied (RBAC no_permission)",
+          r.status_code == 403 and reason_of(r) == "no_permission", reason_of(r))
+
+    # manager issues a small, same-dept, someone-else's invoice -> ABAC allow
+    r = issue_invoice(bob, inv["id"])
+    check("manager issues $4k same-dept invoice (ABAC allow)",
+          r.status_code == 200, f"http {r.status_code} {reason_of(r)}")
+
+    # over-limit -> ABAC deny (same policy shape as expense, on a new service)
+    big = create_invoice(carol, "Hooli", 80000)
+    r = issue_invoice(bob, big["id"])
+    check("manager issue $80k denied (ABAC amount)", r.status_code == 403, reason_of(r))
+
+
 def scenario_payroll_sensitive() -> None:
     print("\nPayroll — sensitive-data RBAC + self-access ABAC + per-row list")
     peggy, _ = access_token("peggy@acme.com", "Acme Corp")    # payroll_admin
@@ -311,6 +348,7 @@ def main() -> int:
     scenario_rbac_abac_expense()
     scenario_direct_grant()
     scenario_authz_hardening()
+    scenario_invoice()
     scenario_payroll_sensitive()
     scenario_tenant_isolation()
     scenario_cache()

@@ -45,6 +45,7 @@ from .security import hash_password
 
 # Business-service models live in their own packages; import so inserts work.
 from services.expense.models import Expense  # noqa: E402
+from services.invoice.models import Invoice  # noqa: E402
 from services.payroll.models import Payslip  # noqa: E402
 
 DEMO_PASSWORD = "password"          # every demo user
@@ -175,6 +176,11 @@ def _seed_tenant_rbac(session: Session, tenant: Tenant, perms: dict[str, Permiss
     _grant(session, tid, payroll_admin, perms["payslip:create"])
     _grant(session, tid, payroll_admin, perms["payslip:read"])
     _grant(session, tid, viewer, perms["expense:read"])
+    # Invoice service (third sample): employees draft/read, managers issue.
+    _grant(session, tid, employee, perms["invoice:create"])
+    _grant(session, tid, employee, perms["invoice:read"])
+    _grant(session, tid, manager, perms["invoice:issue"])
+    _grant(session, tid, viewer, perms["invoice:read"])
 
     # --- hierarchy: manager inherits employee; tenant_admin inherits manager ---
     _inherit(session, tid, manager, employee)
@@ -198,6 +204,16 @@ def _seed_tenant_rbac(session: Session, tenant: Tenant, perms: dict[str, Permiss
         ]
     }, effect="allow")
 
+    # Invoice issue: amount < 10000 AND same org-unit AND issuer != creator
+    # (mirrors expense approval — proves ABAC carries to a brand-new service).
+    _policy(session, tid, perms["invoice:issue"], "invoice_issue_limit", {
+        "all": [
+            {"lt": ["resource.amount", 10000]},
+            {"eq": ["resource.org_unit_id", "subject.org_unit_id"]},
+            {"neq": ["resource.created_by", "subject.user_id"]},
+        ]
+    }, effect="allow")
+
     return {"employee": employee, "manager": manager, "tenant_admin": tenant_admin,
             "payroll_admin": payroll_admin, "viewer": viewer}
 
@@ -214,6 +230,9 @@ def main() -> None:
             "expense:approve": _permission(session, "expense", "expense", "approve", "Approve an expense"),
             "payslip:create": _permission(session, "payroll", "payslip", "create", "Create a payslip"),
             "payslip:read": _permission(session, "payroll", "payslip", "read", "Read a payslip"),
+            "invoice:create": _permission(session, "invoice", "invoice", "create", "Draft an invoice"),
+            "invoice:read": _permission(session, "invoice", "invoice", "read", "View invoices"),
+            "invoice:issue": _permission(session, "invoice", "invoice", "issue", "Issue an invoice"),
         }
 
         # --- platform admin (global identity) ---
@@ -275,6 +294,13 @@ def main() -> None:
                         period="2026-05", gross_amount=8000, net_amount=6200),
                 Payslip(tenant_id=acme.id, employee_user_id=bob.id, org_unit_id=acme_eng.id,
                         period="2026-05", gross_amount=12000, net_amount=9100),
+            ])
+        if session.execute(select(Invoice).where(Invoice.tenant_id == acme.id)).first() is None:
+            session.add_all([
+                Invoice(tenant_id=acme.id, org_unit_id=acme_eng.id, created_by=carol.id,
+                        customer="Initech", amount=4000, status="draft"),
+                Invoice(tenant_id=acme.id, org_unit_id=acme_eng.id, created_by=carol.id,
+                        customer="Hooli", amount=80000, status="draft"),  # over issue limit
             ])
 
     # Bump each tenant's authz epoch so the PDP cache reflects the fresh model.

@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from services.common import cache
 from services.common.db import identity_session
+from services.common.health import readiness
 from services.common.models import (
     AuditLog,
     Membership,
@@ -166,8 +167,14 @@ def _issue_session(session, user_id, tenant_id) -> TokenResponse:
 # --------------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
-    """Liveness probe. No auth; returns the service identity."""
+    """Liveness probe (process up). No auth, no I/O."""
     return {"status": "ok", "service": "auth"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe — verifies Postgres + Redis are reachable (503 if not)."""
+    return readiness("auth")
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -321,14 +328,17 @@ def create_tenant(body: CreateTenantRequest, claims: dict = Depends(require_tena
 
 
 @app.get("/tenants", response_model=list[TenantOut])
-def list_tenants(claims: dict = Depends(require_tenant_admin)):
-    """List ALL tenants on the platform (global `tenants` table).
+def list_tenants(limit: int = 50, offset: int = 0, claims: dict = Depends(require_tenant_admin)):
+    """List tenants (global `tenants` table), paginated (limit capped at 200).
 
     Auth: tenant_admin. (Residual: cross-tenant by nature, ideally PLATFORM ADMIN —
     future work, §17/§13.1.)
     """
     with identity_session() as session:
-        tenants = session.execute(select(Tenant).order_by(Tenant.name)).scalars().all()
+        tenants = session.execute(
+            select(Tenant).order_by(Tenant.name)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         return [TenantOut(id=t.id, name=t.name, status=t.status, tier=t.tier) for t in tenants]
 
 
@@ -350,14 +360,17 @@ def create_user(body: CreateUserRequest, claims: dict = Depends(require_tenant_a
 
 
 @app.get("/users", response_model=list[UserOut])
-def list_users(claims: dict = Depends(require_tenant_admin)):
-    """List ALL users on the platform (global `users` table).
+def list_users(limit: int = 50, offset: int = 0, claims: dict = Depends(require_tenant_admin)):
+    """List users (global `users` table), paginated (limit capped at 200).
 
     Auth: tenant_admin (needed to pick a user to add as a member). Residual: a
     real system would scope/search rather than enumerate all users — §13.1.
     """
     with identity_session() as session:
-        users = session.execute(select(User).order_by(User.email)).scalars().all()
+        users = session.execute(
+            select(User).order_by(User.email)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         return [UserOut(id=u.id, email=u.email, status=u.status) for u in users]
 
 
@@ -396,8 +409,9 @@ def add_member(tenant_id: uuid.UUID, body: AddMemberRequest, claims: dict = Depe
 
 
 @app.get("/tenants/{tenant_id}/members", response_model=list[MemberOut])
-def list_members(tenant_id: uuid.UUID, claims: dict = Depends(require_tenant_admin)):
-    """List members (and their roles) of `tenant_id`.
+def list_members(tenant_id: uuid.UUID, limit: int = 50, offset: int = 0,
+                 claims: dict = Depends(require_tenant_admin)):
+    """List members (and their roles) of `tenant_id`, paginated (limit capped 200).
 
     Auth: tenant_admin of the path tenant (`_assert_tenant`).
     """
@@ -407,6 +421,8 @@ def list_members(tenant_id: uuid.UUID, claims: dict = Depends(require_tenant_adm
             select(Membership, User)
             .join(User, User.id == Membership.user_id)
             .where(Membership.tenant_id == tenant_id)
+            .order_by(User.email)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
         ).all()
         return [
             MemberOut(

@@ -66,8 +66,15 @@ def issue_access_token(user_id: str, tenant_id: str, membership_id: str,
     )
 
 
-def issue_service_token(service_name: str) -> str:
-    return _encode({"svc": service_name, "type": "service"},
+def issue_service_token(service_name: str, audience: str = "authz") -> str:
+    """Mint a service-to-service token.
+
+    ``audience`` scopes the token to ONE intended recipient (default: the PDP).
+    A token minted for the PDP cannot be replayed against a different service —
+    a small but real hardening over a bare shared-secret JWT (the full upgrade is
+    mTLS / SPIFFE workload identity, see docs/DESIGN.md §10).
+    """
+    return _encode({"svc": service_name, "type": "service", "aud": audience},
                    settings.ACCESS_TTL_SECONDS, settings.SERVICE_JWT_SECRET)
 
 
@@ -76,5 +83,11 @@ def decode_user_token(token: str) -> dict[str, Any]:
     return _decode(token, settings.JWT_SECRET)
 
 
-def decode_service_token(token: str) -> dict[str, Any]:
-    return _decode(token, settings.SERVICE_JWT_SECRET)
+def decode_service_token(token: str, audience: str = "authz") -> dict[str, Any]:
+    """Decode + verify a service token, INCLUDING its intended audience.
+
+    A service token whose ``aud`` is not ``audience`` is rejected, so the PDP only
+    accepts tokens that were minted to call it.
+    """
+    return jwt.decode(token, settings.SERVICE_JWT_SECRET,
+                      algorithms=[settings.JWT_ALG], audience=audience)

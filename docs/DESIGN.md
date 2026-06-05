@@ -46,11 +46,12 @@ It must do this with strong tenant isolation, fine-grained rules, full auditabil
 | **Shared PEP library** | ✅ | Policy Enforcement Point middleware imported by each microservice |
 | **Expense Service** | ✅ | Sample service demonstrating **ABAC** (amount thresholds, dept ownership, separation of duties) |
 | **Payroll Service** | ✅ | Sample service demonstrating **sensitive-data RBAC** + tenant isolation |
+| **Invoice Service** | ✅ | Third sample — proves a NEW service plugs in with zero core changes (imports the PEP, registers `invoice:*` permissions, attaches an ABAC issue policy) |
 | **Streamlit Admin UI** | ✅ | Manage tenants, users, roles, permissions, policies; live decision simulator; audit viewer |
 | **PostgreSQL (+RLS) & Redis** | ✅ | Shared DB with row-level security; decision cache + session store |
-| Reporting / Workflow / Notification / Invoice | ⛔ Designed only | They generalize identically to the two sample services; documented, not coded, to fit the timebox |
+| Reporting / Workflow / Notification | ⛔ Designed only | They generalize identically to the three sample services; documented, not coded, to fit the timebox |
 
-This is a deliberate scope decision: **two well-chosen sample services prove the entire cross-service authorization story**; the remaining services are structurally identical (import the same PEP, register their permissions, attach policies).
+This is a deliberate scope decision: **three sample services prove the entire cross-service authorization story** — Invoice specifically demonstrates the "new service = register permissions + import PEP, no core change" claim *in code*; the remaining services are structurally identical.
 
 ---
 
@@ -505,6 +506,7 @@ flowchart LR
 ```
 
 - Each service holds a **client credential** and obtains a **short-lived service JWT** (claim `svc`, e.g. `expense`) to call the PDP. The PDP verifies the signature and that the caller is a known service before trusting the forwarded user context.
+- **Audience-scoped tokens** (implemented): a service token carries an `aud` claim (default `authz`) and the PDP **verifies the audience**, so a token minted to call the PDP cannot be replayed against a different service. The calling service (`svc`) is also recorded in every decision's **audit context** (`caller_svc`).
 - **Two distinct identities per request**: the *service* (caller) and the *user* (subject) — the PDP authorizes the user, while authenticating the service.
 - **Production upgrade (documented):** mTLS between services via a service mesh (Istio/Linkerd) and SPIFFE/SPIRE workload identities; network policies restricting who may call the PDP. The reference impl uses signed service tokens as a lighter equivalent that demonstrates the same trust model.
 - **Token hygiene:** short TTLs, key rotation via a JWKS endpoint, no long-lived shared secrets in business services.
@@ -533,8 +535,13 @@ flowchart LR
 | POST | `/check` | **Decision endpoint**: `{subject, action, resource, env}` → `{decision, reason, policy_id}` |
 | GET/POST | `/permissions` | List / register permissions (global catalog) |
 | GET/POST/PUT/DELETE | `/roles` | Manage roles + role→permission grants + inheritance |
+| GET/POST/DELETE | `/memberships/{id}/permissions` | Direct per-user grants (roles ∪ direct grants; ABAC deny still wins) |
 | GET/POST/PUT/DELETE | `/policies` | Manage ABAC policies |
 | GET | `/audit` | Query audit log (tenant-scoped) |
+
+> All PAP (admin) endpoints above require a tenant-scoped access token whose holder is a `tenant_admin`
+> of that tenant (`require_tenant_admin`); `/check` accepts a service (PEP) token or a user token. Every
+> admin change is audited. See [§13.1](#131-admin-surface-authorization-hardened).
 
 **Example `POST /check`:**
 ```json
@@ -546,7 +553,7 @@ flowchart LR
   "environment": { "ip": "10.0.0.4", "time": "2026-06-04T10:00:00Z" }
 }
 // response
-{ "decision": "allow", "reason": "policy:expense_approval_v3", "decision_id": "dec-abc", "cached": false }
+{ "decision": "allow", "reason": "policy:expense_approval_limit", "decision_id": "dec-abc", "cached": false }
 ```
 
 ### Business services (illustrative — Expense)
@@ -575,6 +582,7 @@ Full request/response examples live in [`docs/api-examples.md`](./api-examples.m
 - **Audit durability:** decisions are written before the response is returned for privileged actions.
 
 **Scaling the data tier**
+- **Bounded responses:** every list endpoint is paginated (`limit`/`offset`, hard-capped at 200), so one request can never materialize an unbounded result set.
 - `audit_log` partitioned by month + archived to cold storage.
 - Tiered isolation: heavy `enterprise` tenants siloed to dedicated DBs to remove noisy-neighbor risk.
 
@@ -633,7 +641,7 @@ the next token refresh (≤15 min); direct-grant and policy changes are instant 
 
 | Concern | Approach |
 |---|---|
-| **Monitoring** | Per-service health endpoints; metrics on check latency, allow/deny ratio, cache hit rate, PDP error rate. |
+| **Monitoring** | Per-service **liveness** (`/healthz`, process up) and **readiness** (`/readyz`, probes Postgres + Redis and returns 503 when a hard dependency is down — so orchestrators stop routing to a degraded pod). Metrics on check latency, allow/deny ratio, cache hit rate, PDP error rate. |
 | **Auditing** | Central, queryable audit log (UI viewer); every decision carries `decision_id`, reason, and full context. |
 | **Debugging** | The **decision simulator** in the UI replays a `check` and shows *which* role granted and *which* policy decided — explainable authorization. `reason`/`policy_id` returned on every deny. |
 | **Tracing** | Correlation ID propagated gateway → service → PDP → audit. |

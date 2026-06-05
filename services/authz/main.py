@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from services.common import cache
 from services.common.db import app_session, tenant_session
+from services.common.health import readiness
 from services.common.models import (
     AuditLog,
     Membership,
@@ -126,8 +127,14 @@ def _audit_admin(tid: str, actor_sub, action: str, reason: str = "",
 # --------------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
-    """Liveness probe. No auth; returns the service identity."""
+    """Liveness probe (process up). No auth, no I/O."""
     return {"status": "ok", "service": "authz"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe — verifies Postgres + Redis are reachable (503 if not)."""
+    return readiness("authz")
 
 
 @app.post("/check", response_model=CheckResponse)
@@ -179,7 +186,8 @@ def check(body: CheckRequest, caller: dict = Depends(require_caller)):
             tenant_id=uuid.UUID(tenant_id),
             actor_user_id=_maybe_uuid(subject.get("user_id")),
             action=body.action, decision=decision, reason=reason,
-            context={"resource": body.resource, "decision_id": decision_id},
+            context={"resource": body.resource, "decision_id": decision_id,
+                     "caller_svc": caller.get("svc")},  # which PEP/service asked
         ))
 
     result = {"decision": decision, "reason": reason,
@@ -216,11 +224,12 @@ def create_permission(body: CreatePermission, _: dict = Depends(require_tenant_a
 
 
 @app.get("/permissions", response_model=list[PermissionOut])
-def list_permissions(_: dict = Depends(require_tenant_admin)):
-    """List the GLOBAL permission catalog. Auth: a tenant-scoped access token."""
+def list_permissions(limit: int = 100, offset: int = 0, _: dict = Depends(require_tenant_admin)):
+    """List the GLOBAL permission catalog, paginated (limit capped at 200)."""
     with app_session() as session:
         perms = session.execute(
             select(Permission).order_by(Permission.service, Permission.resource, Permission.action)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
         ).scalars().all()
         return [PermissionOut(id=p.id, service=p.service, resource=p.resource,
                               action=p.action, key=p.key, description=p.description) for p in perms]
@@ -249,10 +258,13 @@ def create_role(body: CreateRole, claims: dict = Depends(require_tenant_admin)):
 
 
 @app.get("/roles", response_model=list[RoleOut])
-def list_roles(claims: dict = Depends(require_tenant_admin)):
-    """List roles for the caller's tenant (RLS-scoped to the token's tenant)."""
+def list_roles(limit: int = 100, offset: int = 0, claims: dict = Depends(require_tenant_admin)):
+    """List roles for the caller's tenant (RLS-scoped), paginated (limit capped 200)."""
     with tenant_session(claims["tenant_id"]) as session:
-        roles = session.execute(select(Role).order_by(Role.name)).scalars().all()
+        roles = session.execute(
+            select(Role).order_by(Role.name)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         return [RoleOut(id=r.id, name=r.name, description=r.description, is_system=r.is_system) for r in roles]
 
 
@@ -461,10 +473,13 @@ def create_policy(body: CreatePolicy, claims: dict = Depends(require_tenant_admi
 
 
 @app.get("/policies", response_model=list[PolicyOut])
-def list_policies(claims: dict = Depends(require_tenant_admin)):
-    """List ABAC policies for the caller's tenant (RLS-scoped to the token tenant)."""
+def list_policies(limit: int = 100, offset: int = 0, claims: dict = Depends(require_tenant_admin)):
+    """List ABAC policies for the caller's tenant (RLS-scoped), paginated (cap 200)."""
     with tenant_session(claims["tenant_id"]) as session:
-        policies = session.execute(select(Policy).order_by(Policy.name)).scalars().all()
+        policies = session.execute(
+            select(Policy).order_by(Policy.name)
+            .limit(min(max(limit, 1), 200)).offset(max(offset, 0))
+        ).scalars().all()
         return [PolicyOut(id=p.id, permission_id=p.permission_id, name=p.name,
                           condition=p.condition, effect=p.effect, version=p.version,
                           enabled=p.enabled) for p in policies]

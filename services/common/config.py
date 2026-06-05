@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     AUTHZ_URL: str = "http://localhost:8002"
     EXPENSE_URL: str = "http://localhost:8003"
     PAYROLL_URL: str = "http://localhost:8004"
+    INVOICE_URL: str = "http://localhost:8005"
 
 
 settings = Settings()
