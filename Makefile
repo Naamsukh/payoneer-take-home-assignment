@@ -1,5 +1,5 @@
 .PHONY: up down restart build logs ps shell-auth shell-authz shell-expense shell-payroll \
-        db-shell redis-cli bootstrap seed e2e diagrams clean reset help
+        db-shell redis-cli bootstrap seed e2e diagrams design-pdf clean reset help
 
 COMPOSE = docker compose
 
@@ -60,6 +60,13 @@ diagrams: ## Render docs/diagrams/*.mmd to .svg + .png (needs Node/npx)
 		npx -y @mermaid-js/mermaid-cli@11 -i "$$f" -o "$$base.png" -b white -s 2 >/dev/null 2>&1; \
 	done
 	@echo "done -> docs/diagrams/*.svg, *.png"
+
+design-pdf: ## Render docs/DESIGN.md -> docs/submission/DESIGN.pdf (Python: markdown + weasyprint)
+	@python3 -m venv .venv-pdf
+	@. .venv-pdf/bin/activate && pip install --quiet --upgrade pip && pip install --quiet markdown weasyprint pypdf
+	@. .venv-pdf/bin/activate && DYLD_FALLBACK_LIBRARY_PATH="$$(brew --prefix 2>/dev/null)/lib" \
+		python scripts/build_design_pdf.py
+	@echo "note: WeasyPrint needs the Pango/Cairo system libs (macOS: 'brew install pango')."
 
 clean: ## Stop containers and remove images built from this project
 	$(COMPOSE) down --rmi local
