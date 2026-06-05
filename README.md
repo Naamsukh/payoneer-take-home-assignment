@@ -9,9 +9,11 @@ SaaS platform. It answers one question consistently across every service:
 — with strong tenant isolation, hybrid **RBAC + ABAC**, full auditability, and a
 decision cache for low-latency enforcement at scale.
 
+📑 **Submission index (start here):** [`docs/README.md`](docs/README.md) — maps every required deliverable to its file
 📐 **Full design & rationale:** [`docs/DESIGN.md`](docs/DESIGN.md)
 🖼 **Architecture, sequence & schema diagrams:** [`docs/diagrams/`](docs/diagrams/README.md)
 🔌 **API reference with curl examples:** [`docs/api-examples.md`](docs/api-examples.md)
+🔎 **File-by-file code walkthrough:** [`docs/CODE-WALKTHROUGH.md`](docs/CODE-WALKTHROUGH.md)
 
 ---
 
@@ -142,10 +144,12 @@ services/
   authz/         PDP + PAP — engine.py (RBAC graph + ABAC DSL), /check, CRUD, audit
   expense/       sample service — ABAC enforcement via the PEP
   payroll/       sample service — sensitive-data RBAC + per-row authorization
+  invoice/       sample service — proves a NEW service plugs in with zero core changes
 libs/pep/        shared Policy Enforcement Point (FastAPI dependency + client)
 ui/              Streamlit admin console (manage + simulate + audit)
 scripts/e2e.py   end-to-end cross-service test
-docs/            DESIGN.md, api-examples.md
+docs/            README.md (submission index), DESIGN.md, api-examples.md,
+                 CODE-WALKTHROUGH.md, ZANZIBAR-VS-XACML.md, diagrams/
 ```
 
 ---

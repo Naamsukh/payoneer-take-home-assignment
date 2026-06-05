@@ -129,7 +129,8 @@ flowchart TB
     subgraph BusinessSvcs[Sample Microservices]
       EXP[Expense Service + PEP]
       PAY[Payroll Service + PEP]
-      OTHERS[Reporting / Workflow /<br/>Notification / Invoice<br/>same pattern, designed]
+      INV[Invoice Service + PEP]
+      OTHERS[Reporting / Workflow /<br/>Notification<br/>same pattern, designed]
     end
 
     DB[(PostgreSQL<br/>shared DB + RLS,<br/>tenant_id on every row)]
@@ -140,8 +141,10 @@ flowchart TB
     GW --> AUTH
     GW --> EXP
     GW --> PAY
+    GW --> INV
     EXP -- POST /check --> PDP
     PAY -- POST /check --> PDP
+    INV -- POST /check --> PDP
     AUTH --> DB
     AUTH --> CACHE
     PDP --> DB
@@ -150,6 +153,7 @@ flowchart TB
     AUDIT --> DB
     EXP --> DB
     PAY --> DB
+    INV --> DB
     UI -. manage roles/policies .-> PDP
     UI -. manage users/tenants .-> AUTH
 ```
@@ -518,8 +522,8 @@ flowchart LR
 ### Auth Service
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/auth/login` | Authenticate **global identity** → identity token + list of memberships |
-| POST | `/auth/select-tenant` | Pick active tenant → **tenant-scoped** access + refresh tokens |
+| POST | `/auth/login` | Authenticate **global identity** → identity token + memberships, **auto-scoped to the primary (first-joined) tenant** (returns access + refresh tokens in one call) |
+| POST | `/auth/select-tenant` | Pick a specific tenant → **tenant-scoped** access + refresh tokens |
 | POST | `/auth/switch-tenant` | Re-issue a scoped token for a different tenant the user belongs to |
 | GET | `/auth/me` | Current identity + memberships |
 | POST | `/auth/refresh` | Exchange refresh token for new access token |
@@ -714,7 +718,7 @@ Every capability the assignment names, mapped to where it is satisfied.
 
 | Assignment phrase | Where addressed |
 |---|---|
-| Multiple services (User/Expense/Payroll/Reporting/Workflow/Notification/Invoice) | §1 (2 built as samples, rest designed-identical) |
+| Multiple services (User/Expense/Payroll/Reporting/Workflow/Notification/Invoice) | §1 (Auth + **3 built** samples: Expense/Payroll/Invoice; Reporting/Workflow/Notification designed-identical) |
 | Each tenant: own users | FR-2, §6.1 + §7 MEMBERSHIP, §9 |
 | A user across multiple tenants (identity vs participation) | §6.1, §7 USER/MEMBERSHIP split, §8 select/switch-tenant |
 | Organizational hierarchy | §6 Org Unit + role inheritance, §7 ORG_UNIT self-ref |

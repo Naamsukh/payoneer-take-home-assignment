@@ -20,7 +20,8 @@ flowchart TB
     subgraph BusinessSvcs[Sample Microservices]
       EXP[Expense Service + PEP]
       PAY[Payroll Service + PEP]
-      OTHERS[Reporting / Workflow /<br/>Notification / Invoice<br/>same pattern, designed]
+      INV[Invoice Service + PEP]
+      OTHERS[Reporting / Workflow /<br/>Notification<br/>same pattern, designed]
     end
 
     DB[(PostgreSQL<br/>shared DB + RLS,<br/>tenant_id on every row)]
@@ -31,8 +32,10 @@ flowchart TB
     GW --> AUTH
     GW --> EXP
     GW --> PAY
+    GW --> INV
     EXP -- POST /check --> PDP
     PAY -- POST /check --> PDP
+    INV -- POST /check --> PDP
     AUTH --> DB
     AUTH --> CACHE
     PDP --> DB
@@ -41,5 +44,6 @@ flowchart TB
     AUDIT --> DB
     EXP --> DB
     PAY --> DB
+    INV --> DB
     UI -. manage roles/policies .-> PDP
     UI -. manage users/tenants .-> AUTH

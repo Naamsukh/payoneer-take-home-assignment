@@ -10,6 +10,7 @@ erDiagram
     ORG_UNIT ||--o{ ORG_UNIT : parent_of
     MEMBERSHIP }o--|| ORG_UNIT : belongs_to
     MEMBERSHIP }o--o{ ROLE : "membership_roles"
+    MEMBERSHIP }o--o{ PERMISSION : "membership_permissions (direct grant)"
     ROLE }o--o{ ROLE : "role_hierarchy"
     ROLE }o--o{ PERMISSION : "role_permissions"
     PERMISSION ||--o{ POLICY : "policy_target"
@@ -70,6 +71,13 @@ erDiagram
       uuid membership_id FK
       uuid role_id FK
       uuid scope_org_unit_id FK "nullable scope"
+    }
+    MEMBERSHIP_PERMISSIONS {
+      uuid id PK
+      uuid tenant_id FK
+      uuid membership_id FK
+      uuid permission_id FK
+      "direct per-user grant; unique(membership_id, permission_id)"
     }
     POLICY {
       uuid id PK

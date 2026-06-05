@@ -3,4 +3,5 @@
 flowchart LR
     EXP[Expense Svc] -- "service JWT (svc=expense)" --> PDP[Authz Svc]
     PAY[Payroll Svc] -- "service JWT (svc=payroll)" --> PDP
+    INV[Invoice Svc] -- "service JWT (svc=invoice)" --> PDP
     PDP -- "verify signature + svc claim" --> PDP
