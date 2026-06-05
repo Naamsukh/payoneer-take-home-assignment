@@ -30,6 +30,7 @@ from . import cache
 from .db import identity_session
 from .models import (
     Membership,
+    MembershipPermission,
     MembershipRole,
     OrgUnit,
     Permission,
@@ -115,6 +116,16 @@ def _member(session: Session, tenant_id, user: User, org_unit: OrgUnit | None,
             membership_id=membership.id, role_id=role.id,
         )
     return membership
+
+
+def _grant_membership_perm(session: Session, tenant_id, membership: Membership,
+                           perm: Permission) -> None:
+    """Grant a permission DIRECTLY to a membership (per-user grant, idempotent)."""
+    _get_or_create(
+        session, MembershipPermission,
+        defaults={"tenant_id": tenant_id},
+        membership_id=membership.id, permission_id=perm.id,
+    )
 
 
 def _policy(session: Session, tenant_id, perm: Permission, name: str,
@@ -236,6 +247,13 @@ def main() -> None:
         dave_m = _member(session, acme.id, dave, acme_sales, [acme_roles["employee"]])
         _member(session, acme.id, peggy, None, [acme_roles["payroll_admin"]])
 
+        # --- direct per-user grant (demo of membership_permissions) ---
+        # carol is only an `employee`, but we grant her expense:approve DIRECTLY.
+        # She can now approve — yet the expense_approval_limit ABAC policy still
+        # blocks her OWN expense and over-limit amounts: a direct grant widens the
+        # RBAC gate, ABAC deny/narrowing still applies on top (deny wins).
+        _grant_membership_perm(session, acme.id, carol_m, perms["expense:approve"])
+
         # --- memberships (Globex) ---
         # alice is tenant_admin in Acme but only a viewer in Globex.
         _member(session, globex.id, alice, globex_eng, [globex_roles["viewer"]])
@@ -272,7 +290,7 @@ def main() -> None:
     print("[seed] login (password for all demo users = 'password'):")
     print("[seed]   alice@acme.com   tenant_admin @ Acme, viewer @ Globex  (multi-tenant)")
     print("[seed]   bob@acme.com     manager @ Acme/Engineering")
-    print("[seed]   carol@acme.com   employee @ Acme/Engineering")
+    print("[seed]   carol@acme.com   employee @ Acme/Engineering (+ DIRECT expense:approve grant)")
     print("[seed]   dave@acme.com    employee @ Acme/Sales")
     print("[seed]   peggy@acme.com   payroll_admin @ Acme")
     print("[seed]   frank@globex.com tenant_admin @ Globex")

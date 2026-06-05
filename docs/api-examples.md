@@ -158,6 +158,14 @@ curl -s localhost:8002/roles/<role-uuid>/permissions -H "Authorization: Bearer $
 curl -s localhost:8002/roles/<manager-uuid>/children -H "Authorization: Bearer $TOK" \
   -H 'Content-Type: application/json' -d '{"child_role_id":"<employee-uuid>"}'
 
+# Direct per-user grant: attach a permission straight to a membership (on top of
+# its roles). Effective set = roles ∪ direct grants; an ABAC deny still overrides.
+curl -s localhost:8002/memberships/<membership-uuid>/permissions -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' -d '{"permission_id":"<perm-uuid>"}'
+curl -s localhost:8002/memberships/<membership-uuid>/permissions -H "Authorization: Bearer $TOK"   # list
+curl -s -X DELETE localhost:8002/memberships/<membership-uuid>/permissions/<perm-uuid> \
+  -H "Authorization: Bearer $TOK"   # revoke
+
 # ABAC policies
 curl -s localhost:8002/policies -H "Authorization: Bearer $TOK"
 curl -s localhost:8002/policies -H "Authorization: Bearer $TOK" \

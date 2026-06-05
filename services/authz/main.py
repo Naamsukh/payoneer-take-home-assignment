@@ -17,6 +17,8 @@ from services.common import cache
 from services.common.db import app_session, tenant_session
 from services.common.models import (
     AuditLog,
+    Membership,
+    MembershipPermission,
     Permission,
     Policy,
     Role,
@@ -292,6 +294,74 @@ def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depend
                                       child_role_id=body.child_role_id))
     cache.bump_tenant_version(tid)
     return {"status": "linked"}
+
+
+# --------------------------------------------------------------------------
+# PAP — direct per-user permission grants (membership_permissions)
+# --------------------------------------------------------------------------
+@app.post("/memberships/{membership_id}/permissions")
+def grant_membership_permission(membership_id: uuid.UUID, body: GrantPermission,
+                                claims: dict = Depends(require_access)):
+    """Grant a permission DIRECTLY to a membership, on top of its roles.
+
+    The effective set at decision time is role-derived permissions UNION these
+    direct grants; an ABAC deny policy still overrides (deny wins). Idempotent.
+    Tenant comes from the token and the write is RLS-scoped — a membership in
+    another tenant resolves to 404 — then the tenant epoch is bumped so cached
+    decisions re-evaluate. Auth: a tenant-scoped access token.
+    """
+    tid = claims["tenant_id"]
+    with tenant_session(tid) as session:
+        if session.get(Membership, membership_id) is None:
+            raise HTTPException(status_code=404, detail="membership not found")
+        if session.get(Permission, body.permission_id) is None:
+            raise HTTPException(status_code=400, detail="permission not found")
+        existing = session.execute(
+            select(MembershipPermission).where(
+                MembershipPermission.membership_id == membership_id,
+                MembershipPermission.permission_id == body.permission_id)
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(MembershipPermission(
+                tenant_id=uuid.UUID(tid), membership_id=membership_id,
+                permission_id=body.permission_id))
+    cache.bump_tenant_version(tid)
+    return {"status": "granted"}
+
+
+@app.delete("/memberships/{membership_id}/permissions/{permission_id}")
+def revoke_membership_permission(membership_id: uuid.UUID, permission_id: uuid.UUID,
+                                 claims: dict = Depends(require_access)):
+    """Revoke a direct per-user permission grant, then bump the tenant epoch.
+
+    RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
+    """
+    tid = claims["tenant_id"]
+    with tenant_session(tid) as session:
+        link = session.execute(
+            select(MembershipPermission).where(
+                MembershipPermission.membership_id == membership_id,
+                MembershipPermission.permission_id == permission_id)
+        ).scalar_one_or_none()
+        if link is not None:
+            session.delete(link)
+    cache.bump_tenant_version(tid)
+    return {"status": "revoked"}
+
+
+@app.get("/memberships/{membership_id}/permissions", response_model=list[PermissionOut])
+def list_membership_permissions(membership_id: uuid.UUID, claims: dict = Depends(require_access)):
+    """List the DIRECT per-user permission grants for a membership (RLS-scoped)."""
+    with tenant_session(claims["tenant_id"]) as session:
+        perm_ids = session.execute(
+            select(MembershipPermission.permission_id).where(
+                MembershipPermission.membership_id == membership_id)
+        ).scalars().all()
+        if not perm_ids:
+            return []
+        perms = session.execute(select(Permission).where(Permission.id.in_(perm_ids))).scalars().all()
+        return [PermissionOut(id=p.id, service=p.service, resource=p.resource,
+                              action=p.action, key=p.key, description=p.description) for p in perms]
 
 
 # --------------------------------------------------------------------------

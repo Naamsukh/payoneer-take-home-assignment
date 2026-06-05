@@ -290,6 +290,44 @@ def page_members_roles() -> None:
                     except ApiError as e:
                         st.error(e.detail)
 
+    # Direct per-user permission grants (membership_permissions)
+    with st.expander("Direct permission grant (per-user, on top of roles)"):
+        st.caption("Grant a single permission straight to a member. Effective at decision time as "
+                   "roles ∪ direct grants; an ABAC deny policy still overrides (deny wins).")
+        perms = perm_map()
+        member_by_email = {m["email"]: m for m in members}
+        if member_by_email and perms:
+            dp_email = st.selectbox("Member", list(member_by_email), key="dp_m")
+            dp_mid = member_by_email[dp_email]["membership_id"]
+            try:
+                current = api.authz_get(f"/memberships/{dp_mid}/permissions", token=tok)
+            except ApiError as e:
+                st.error(e.detail)
+                current = []
+            st.write("Current direct grants: "
+                     + (", ".join(sorted(p["key"] for p in current)) or "—"))
+            colC, colD = st.columns(2)
+            with colC.form("grant_perm"):
+                st.caption("Grant")
+                gk = st.selectbox("Permission", sorted(perms), key="gp_k")
+                if st.form_submit_button("Grant permission"):
+                    try:
+                        api.authz_post(f"/memberships/{dp_mid}/permissions", token=tok,
+                                       json={"permission_id": perms[gk]["id"]})
+                        st.rerun()
+                    except ApiError as e:
+                        st.error(e.detail)
+            with colD.form("revoke_perm"):
+                st.caption("Revoke")
+                rk_opts = {p["key"]: p["id"] for p in current}
+                rk = st.selectbox("Permission", list(rk_opts) or ["— none granted —"], key="rp_k")
+                if st.form_submit_button("Revoke permission") and rk in rk_opts:
+                    try:
+                        api.authz_delete(f"/memberships/{dp_mid}/permissions/{rk_opts[rk]}", token=tok)
+                        st.rerun()
+                    except ApiError as e:
+                        st.error(e.detail)
+
 
 def page_permissions() -> None:
     st.header("Permission catalog (global)")

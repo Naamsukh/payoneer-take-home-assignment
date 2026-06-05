@@ -218,6 +218,7 @@ flowchart LR
 - **Role** — a tenant-scoped named bundle of permissions. Roles can **inherit** other roles (`manager` inherits `employee`), forming a DAG that also models organizational seniority.
 - **Org Unit** — node in the tenant's org tree (Company → Dept → Team). A *membership* belongs to one (so the same user can sit in different org units across tenants). Used by ABAC (`resource.dept == subject.dept`) and for scoped role assignments.
 - **Policy (ABAC)** — `{ condition, effect }` attached to a permission. The condition is a small JSON boolean expression over `subject.*`, `resource.*`, `environment.*` attributes. Effect is `allow` or `deny`.
+- **Direct grant (per-user)** — a permission attached **directly to a membership** (`membership_permissions`), in addition to whatever its roles grant. The effective permission set at decision time is *roles (incl. inheritance) **∪** direct grants*. This is the supported way to give one user one extra permission without inventing a single-member role; it only **widens** the RBAC gate — ABAC deny policies still run afterwards and take priority, so a direct grant can never override an explicit deny. Like roles, direct grants are tenant-scoped (RLS) and changing them bumps the tenant authz epoch (cache invalidation).
 
 ### Condition language (JSON DSL)
 
@@ -238,6 +239,7 @@ Supported operators: `all` (AND), `any` (OR), `not`, `eq`, `neq`, `lt`, `lte`, `
 ```
 decision(subject, action_triple, resource_attrs, env):
     1. effective_perms = resolve_role_graph(subject.roles)      # transitive closure
+                       ∪ direct_grants(subject.user)            # per-user membership_permissions
     2. if action_triple not in effective_perms: return DENY("no_permission")
     3. policies = enabled_policies_for(action_triple, subject.tenant)
     4. if any DENY policy evaluates true: return DENY(policy)   # explicit deny wins
@@ -261,6 +263,7 @@ keeps the cache valuable without losing the decision trail.
 - *Manager approves a $5k expense in their own dept, not their own* → has `expense:approve`; policy `amount<10000 AND same dept AND approver≠creator` → **ALLOW**.
 - *Manager approves a $50k expense* → permission present but ABAC `amount<10000` fails → **DENY** (reason = policy id). Demonstrates fine-grained control beyond roles.
 - *Manager tries to approve their own expense* → separation-of-duties `neq(created_by, user_id)` fails → **DENY**.
+- *Employee with a **direct** `expense:approve` grant approves a colleague's $5k same-dept expense* → permission present via `membership_permissions` (not a role); ABAC `expense_approval_limit` matches → **ALLOW**. The same employee approving *their own* expense still → **DENY** (separation-of-duties): the direct grant widens the gate, ABAC still narrows it.
 
 ---
 
@@ -279,6 +282,7 @@ erDiagram
     ORG_UNIT ||--o{ ORG_UNIT : parent_of
     MEMBERSHIP }o--|| ORG_UNIT : belongs_to
     MEMBERSHIP }o--o{ ROLE : "membership_roles"
+    MEMBERSHIP }o--o{ PERMISSION : "membership_permissions (direct grant)"
     ROLE }o--o{ ROLE : "role_hierarchy"
     ROLE }o--o{ PERMISSION : "role_permissions"
     PERMISSION ||--o{ POLICY : "policy_target"
@@ -340,6 +344,13 @@ erDiagram
       uuid role_id FK
       uuid scope_org_unit_id FK "nullable scope"
     }
+    MEMBERSHIP_PERMISSIONS {
+      uuid id PK
+      uuid tenant_id FK
+      uuid membership_id FK
+      uuid permission_id FK
+      "direct per-user grant; unique(membership_id, permission_id)"
+    }
     POLICY {
       uuid id PK
       uuid tenant_id FK
@@ -375,6 +386,7 @@ erDiagram
 - `permissions` is a **global catalog** (not tenant-scoped) → uniform semantics across tenants; new services insert their permission rows at startup (idempotent).
 - A per-tenant **authz epoch** (a counter in Redis, bumped on any role/permission/policy change) is included in the **decision cache key**. A single change invalidates *all* cached decisions for that tenant instantly — covering RBAC changes too, not just policy edits. (`policy.version` is additionally kept on each policy row for history/optimistic updates.)
 - `membership_roles.scope_org_unit_id` enables **scoped grants** (e.g. "manager of Engineering only"); roles are per-membership, so the same user can hold different roles in different tenants.
+- `membership_permissions` is the **direct per-user grant** path: a permission attached straight to a membership, unioned with role-derived permissions at decision time. It lets you give one user one extra permission without minting a single-member role; ABAC deny still overrides it. Tenant-scoped (RLS) and epoch-bumped on change like every other authz mutation.
 - `session.active_tenant_id` records which tenant a refresh session is scoped to; switching tenants issues a new scoped session.
 - `audit_log` is append-only (no UPDATE/DELETE grants); partitioned by month at scale.
 

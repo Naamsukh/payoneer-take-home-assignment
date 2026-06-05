@@ -6,6 +6,8 @@ asserts every access pattern in the design behaves correctly:
   RBAC      — granted action allowed; ungranted action denied (no_permission)
   ABAC      — expense approval gated by amount threshold, same org-unit, and
               separation-of-duties (creator != approver)
+  Direct    — a per-user membership_permissions grant widens the RBAC gate, yet
+              an ABAC deny (separation-of-duties) still overrides it
   Sensitive — payslip self-access; payroll_admin sees all; per-row list filter
   Isolation — a tenant-scoped token cannot see another tenant's rows
   Cache     — the PDP returns a cached decision on the second identical check
@@ -120,8 +122,11 @@ def scenario_rbac_abac_expense() -> None:
     exp = create_expense(carol, 4000, "e2e small expense")
     check("employee creates expense (RBAC allow)", exp["status"] == "submitted")
 
-    # RBAC: employee cannot approve
-    r = approve_expense(carol, exp["id"])
+    # RBAC: a pure employee (dave — no role grant, no direct grant) cannot approve.
+    # (carol is NOT used here: she carries a direct expense:approve grant — see
+    # scenario_direct_grant — so the no_permission case must use dave.)
+    dave_own = create_expense(dave, 1500, "e2e dave own expense")
+    r = approve_expense(dave, dave_own["id"])
     check("employee approve denied (RBAC no_permission)",
           r.status_code == 403 and reason_of(r) == "no_permission", reason_of(r))
 
@@ -146,6 +151,27 @@ def scenario_rbac_abac_expense() -> None:
     own = create_expense(bob, 2000, "e2e own expense")
     r = approve_expense(bob, own["id"])
     check("manager approve own expense denied (ABAC SoD)",
+          r.status_code == 403, reason_of(r))
+
+
+def scenario_direct_grant() -> None:
+    print("\nDirect per-user grant — membership_permissions (∪ roles; ABAC deny still wins)")
+    carol, _ = access_token("carol@acme.com", "Acme Corp")    # employee + DIRECT expense:approve
+    bob, _ = access_token("bob@acme.com", "Acme Corp")        # manager, Engineering
+
+    # carol holds expense:approve via a DIRECT grant (not a role). She approves a
+    # same-dept colleague's small expense -> ALLOW (the grant widens the RBAC gate,
+    # and the ABAC expense_approval_limit policy is satisfied).
+    colleague_exp = create_expense(bob, 2500, "e2e colleague expense (Engineering)")
+    r = approve_expense(carol, colleague_exp["id"])
+    check("employee w/ direct grant approves colleague's $2.5k (grant + ABAC allow)",
+          r.status_code == 200, f"http {r.status_code} {reason_of(r)}")
+
+    # Deny still wins: approving her OWN expense fails separation-of-duties, even
+    # though she now holds the permission directly (deny overrides the direct grant).
+    own = create_expense(carol, 1000, "e2e own expense (direct-grant holder)")
+    r = approve_expense(carol, own["id"])
+    check("direct grant cannot override ABAC deny (SoD)",
           r.status_code == 403, reason_of(r))
 
 
@@ -225,6 +251,7 @@ def scenario_cache() -> None:
 def main() -> int:
     print("=== End-to-end access-control test ===")
     scenario_rbac_abac_expense()
+    scenario_direct_grant()
     scenario_payroll_sensitive()
     scenario_tenant_isolation()
     scenario_cache()

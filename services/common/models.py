@@ -150,6 +150,24 @@ class MembershipRole(Base):
     scope_org_unit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
+class MembershipPermission(Base):
+    """Permission granted DIRECTLY to a membership (a user within one tenant),
+    in addition to whatever the membership's roles grant.
+
+    This is the per-user grant path: the effective permission set at decision time
+    is the UNION of role-derived permissions and these direct grants. ABAC deny
+    policies still run afterwards and take priority, so a direct grant cannot
+    override an explicit deny (docs/DESIGN.md §6).
+    """
+    __tablename__ = "membership_permissions"
+    __table_args__ = (UniqueConstraint("membership_id", "permission_id", name="uq_membership_permission"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    membership_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("memberships.id"), nullable=False)
+    permission_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("permissions.id"), nullable=False)
+
+
 class Policy(Base):
     """ABAC policy: a JSON condition + effect attached to a permission."""
     __tablename__ = "policies"

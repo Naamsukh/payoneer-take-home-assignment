@@ -13,6 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from services.common.models import (
+    Membership,
+    MembershipPermission,
     Permission,
     Policy,
     Role,
@@ -128,6 +130,38 @@ def effective_permission_keys(session: Session, role_names: list[str]) -> set[st
     return {p.key for p in perms}
 
 
+def direct_permission_keys(session: Session, user_id) -> set[str]:
+    """Permissions granted DIRECTLY to this user's membership (per-user grants).
+
+    Resolved inside the tenant-scoped (RLS) session, so it only ever sees the
+    caller's own tenant; the membership is located by user_id (unique per
+    user+tenant). Returns an empty set if the user has no direct grants. The
+    caller unions this with the role-derived set; ABAC deny still wins downstream.
+    """
+    if not user_id:
+        return set()
+    try:
+        uid = uuid.UUID(str(user_id))
+    except (ValueError, TypeError):
+        return set()
+
+    mem_ids = session.execute(
+        select(Membership.id).where(Membership.user_id == uid)
+    ).scalars().all()
+    if not mem_ids:
+        return set()
+
+    perm_ids = session.execute(
+        select(MembershipPermission.permission_id).where(
+            MembershipPermission.membership_id.in_(mem_ids))
+    ).scalars().all()
+    if not perm_ids:
+        return set()
+
+    perms = session.execute(select(Permission).where(Permission.id.in_(perm_ids))).scalars().all()
+    return {p.key for p in perms}
+
+
 def _permission_for_action(session: Session, action: str) -> Permission | None:
     try:
         svc, res, act = action.split(":")
@@ -147,12 +181,14 @@ def decide(session: Session, subject: dict, action: str,
     """Return (decision, reason, policy_id). Deny by default; explicit deny wins.
 
     1. RBAC: action must be in the subject's effective permissions, else DENY.
-    2. ABAC: deny-policy match -> DENY (explicit deny wins).
+       Effective = role-derived (incl. inheritance) UNION direct per-user grants.
+    2. ABAC: deny-policy match -> DENY (explicit deny wins — overrides a direct grant).
     3. If allow-policies exist for this permission, one must match, else DENY.
     4. Otherwise ALLOW (RBAC baseline grant, no further ABAC constraints).
     """
     role_names = subject.get("roles", []) or []
     granted = effective_permission_keys(session, role_names)
+    granted |= direct_permission_keys(session, subject.get("user_id"))  # per-user direct grants
     if action not in granted:
         return ("deny", "no_permission", None)
 

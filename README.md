@@ -84,7 +84,7 @@ make e2e       # run the end-to-end cross-service access-control test
 |---|---|---|
 | `alice@acme.com` | `tenant_admin` | `viewer` *(same identity, different roles — multi-tenant)* |
 | `bob@acme.com` | `manager` (Engineering) | — |
-| `carol@acme.com` | `employee` (Engineering) | — |
+| `carol@acme.com` | `employee` (Engineering) + direct `expense:approve` grant | — |
 | `dave@acme.com` | `employee` (Sales) | — |
 | `peggy@acme.com` | `payroll_admin` | — |
 | `frank@globex.com` | — | `tenant_admin` |
