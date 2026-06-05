@@ -97,6 +97,26 @@ make e2e       # run the end-to-end cross-service access-control test
 
 ---
 
+## Screenshots
+
+The Streamlit admin console ([`docs/screenshots/`](docs/screenshots)) — drives the whole system
+through the public APIs (manage tenants/users/roles/policies, simulate decisions, view the audit log).
+
+| | |
+|---|---|
+| **Login** — global identity, then pick the active tenant | **Overview** — signed-in context + memberships |
+| ![Login](docs/screenshots/login.png) | ![Overview](docs/screenshots/overview.png) |
+| **Tenants & Users** — global users, multi-tenant memberships | **Members & Roles** — org-units, role assignment |
+| ![Tenants & Users](docs/screenshots/tenants.png) | ![Members & Roles](docs/screenshots/members-and-roles.png) |
+| **Permissions** — the global `(service, resource, action)` catalog | **Roles & Policies** — inheritance + ABAC policies |
+| ![Permissions](docs/screenshots/permissions.png) | ![Roles & Policies](docs/screenshots/roles-and-policies.png) |
+| **Decision Simulator — ALLOW** — replays `POST /check`, explains the verdict | **Decision Simulator — DENY** — same, denied with a reason |
+| ![Decision allow](docs/screenshots/decision-pass.png) | ![Decision deny](docs/screenshots/decision-fail.png) |
+| **Audit log** — every decision + admin change, with reason | |
+| ![Audit log](docs/screenshots/audit-log.png) | |
+
+---
+
 ## What the demo proves
 
 Run `make e2e` (or click through the UI's **Decision Simulator**) to see:
