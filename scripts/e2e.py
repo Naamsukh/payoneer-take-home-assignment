@@ -8,6 +8,8 @@ asserts every access pattern in the design behaves correctly:
               separation-of-duties (creator != approver)
   Direct    — a per-user membership_permissions grant widens the RBAC gate, yet
               an ABAC deny (separation-of-duties) still overrides it
+  Hardening — PAP/admin endpoints require tenant_admin (no self-escalation);
+              /check binds a non-admin's subject to their token (no forged roles)
   Sensitive — payslip self-access; payroll_admin sees all; per-row list filter
   Isolation — a tenant-scoped token cannot see another tenant's rows
   Cache     — the PDP returns a cached decision on the second identical check
@@ -112,6 +114,20 @@ def reason_of(resp: httpx.Response) -> str:
 # --------------------------------------------------------------------------
 # Scenarios
 # --------------------------------------------------------------------------
+def scenario_login_autoscope() -> None:
+    print("\nLogin auto-scope — primary active membership yields a usable token")
+    data = login("alice@acme.com")   # alice has TWO memberships (Acme admin, Globex viewer)
+    check("login returns an access token (auto-scoped)", bool(data.get("access_token")),
+          "no access_token in login response")
+    acme = next(m for m in data["memberships"] if m["tenant_name"] == "Acme Corp")
+    check("auto-scoped to primary (first-joined) tenant = Acme",
+          str(data.get("active_tenant_id")) == str(acme["tenant_id"]),
+          f"active={data.get('active_tenant_id')}")
+    # The login token is immediately usable — no separate select-tenant call.
+    r = httpx.get(f"{AUTHZ}/roles", headers=H(data["access_token"]))
+    check("login token usable straight away (admin PAP 200)", r.status_code == 200, f"http {r.status_code}")
+
+
 def scenario_rbac_abac_expense() -> None:
     print("\nExpense — RBAC + ABAC (amount / org-unit / separation-of-duties)")
     bob, _ = access_token("bob@acme.com", "Acme Corp")        # manager, Engineering
@@ -173,6 +189,47 @@ def scenario_direct_grant() -> None:
     r = approve_expense(carol, own["id"])
     check("direct grant cannot override ABAC deny (SoD)",
           r.status_code == 403, reason_of(r))
+
+
+def scenario_authz_hardening() -> None:
+    print("\nAuthZ hardening — admin-gated PAP (#1) + /check subject binding (#2)")
+    carol, carol_tid = access_token("carol@acme.com", "Acme Corp")   # employee (non-admin)
+    alice, _ = access_token("alice@acme.com", "Acme Corp")           # tenant_admin
+    carol_login = login("carol@acme.com")
+    carol_uid = carol_login["user_id"]
+    carol_mid = next(m["membership_id"] for m in carol_login["memberships"]
+                     if m["tenant_name"] == "Acme Corp")
+    perms = httpx.get(f"{AUTHZ}/permissions", headers=H(alice)).json()   # admin can read catalog
+    payslip_create = next(p for p in perms if p["key"] == "payroll:payslip:create")
+
+    # #1: a non-admin cannot self-grant a permission (PAP now requires tenant_admin)
+    r = httpx.post(f"{AUTHZ}/memberships/{carol_mid}/permissions",
+                   json={"permission_id": payslip_create["id"]}, headers=H(carol))
+    check("non-admin cannot self-grant a permission (403)", r.status_code == 403, f"http {r.status_code}")
+
+    # #1: a non-admin cannot create a role / read the catalog
+    r = httpx.post(f"{AUTHZ}/roles", json={"name": "evil", "description": "x"}, headers=H(carol))
+    check("non-admin cannot create a role (403)", r.status_code == 403, f"http {r.status_code}")
+    r = httpx.get(f"{AUTHZ}/permissions", headers=H(carol))
+    check("non-admin cannot read PAP catalog (403)", r.status_code == 403, f"http {r.status_code}")
+
+    # admin still can
+    r = httpx.get(f"{AUTHZ}/roles", headers=H(alice))
+    check("tenant_admin can use PAP (200)", r.status_code == 200, f"http {r.status_code}")
+
+    # #1: a non-admin cannot add a member via the Auth management API
+    users = httpx.get(f"{AUTH}/users", headers=H(carol))
+    check("non-admin cannot list users via mgmt API (403)", users.status_code == 403, f"http {users.status_code}")
+
+    # #2: carol forges roles=[payroll_admin] in /check for payslip:create. Bound to
+    # her real identity (employee) -> deny, not allow. (She is not a tenant_admin,
+    # so the simulator override does not apply.)
+    body = {"subject": {"user_id": carol_uid, "tenant_id": carol_tid,
+                        "roles": ["payroll_admin", "tenant_admin"], "org_unit_id": None},
+            "action": "payroll:payslip:create", "resource": {}, "environment": {}}
+    r = httpx.post(f"{AUTHZ}/check", json=body, headers=H(carol)).json()
+    check("forged roles in /check ignored — subject bound to token (deny)",
+          r["decision"] == "deny", r.get("reason"))
 
 
 def scenario_payroll_sensitive() -> None:
@@ -250,8 +307,10 @@ def scenario_cache() -> None:
 
 def main() -> int:
     print("=== End-to-end access-control test ===")
+    scenario_login_autoscope()
     scenario_rbac_abac_expense()
     scenario_direct_grant()
+    scenario_authz_hardening()
     scenario_payroll_sensitive()
     scenario_tenant_isolation()
     scenario_cache()

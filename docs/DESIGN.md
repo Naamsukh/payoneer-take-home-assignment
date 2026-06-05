@@ -409,9 +409,11 @@ sequenceDiagram
     U->>GW: POST /auth/login {email, pwd}
     GW->>A: forward
     A->>DB: verify global credentials
-    A-->>U: identity token (no tenant) + memberships [{tenant, status}]
-    Note over U,A: Select active tenant (auto if only one)
-    U->>GW: POST /auth/select-tenant {tenant_id} (Bearer identity token)
+    A->>DB: load memberships; pick PRIMARY (first-joined) active membership
+    A->>C: store refresh session for the primary tenant
+    A-->>U: identity token + memberships + access JWT auto-scoped to primary tenant
+    Note over U,A: Switch tenant only when acting elsewhere (login already scoped)
+    U->>GW: POST /auth/switch-tenant {tenant_id} (Bearer identity/access token)
     GW->>A: forward
     A->>DB: verify ACTIVE membership(user, tenant), load roles for that membership
     A->>C: store refresh session (active_tenant_id)
@@ -589,33 +591,41 @@ Full request/response examples live in [`docs/api-examples.md`](./api-examples.m
 - **Data isolation:** RLS guarantees tenant boundary at the storage layer.
 - **Separation of duties** modeled natively via ABAC (`creator ≠ approver`).
 
-### 13.1 Known gap — authorization on the BYPASSRLS management surface
+### 13.1 Admin-surface authorization (hardened)
 
-The Auth service is the **identity authority**, so it runs under the `identity_user` role which has
-**`BYPASSRLS`** — it legitimately operates *above* tenant scope (global users, a user's memberships
-spanning many tenants). Postgres RLS therefore does **not** protect this surface; protection must come
-from an explicit application-level authorization check on the caller.
+The Auth service is the **identity authority** and runs under the `identity_user` role which has
+**`BYPASSRLS`**; the Authz **PAP** (roles/permissions/policies/direct-grants) is tenant-scoped but is
+the surface that *defines* authorization. Neither is protected by RLS against a *member of the tenant*,
+so protection must come from an application-level check on the caller.
 
-Today the management endpoints (`/tenants`, `/users`, `/tenants/{id}/members`,
-`/memberships/{id}/roles`, `/tenants/{id}/org-units`, …) are guarded only by `require_token`, i.e.
-*"is the caller authenticated?"* — **not** *"is the caller a platform admin, or an admin of the
-`tenant_id` in the path?"* Several of these are inherently cross-tenant (e.g. `GET /users` lists every
-user on the platform; `POST /tenants/{id}/members` targets an arbitrary tenant via the path param).
+**The gap (now closed):** previously every PAP and management endpoint was guarded only by
+`require_token` / `require_access` — *"is the caller authenticated / tenant-scoped?"*, **not** *"is the
+caller an admin?"*. That was a **vertical privilege-escalation** hole: any tenant member could create
+roles, write policies, assign roles, or **directly grant themselves a permission**
+(`POST /memberships/{id}/permissions`) — a one-call self-escalation.
 
-- **Why it is not an isolation leak in the audited sense:** every such query is *hand-scoped* with an
-  explicit `WHERE user_id / tenant_id / membership_id` and a cross-tenant guard on role assignment
-  (`role.tenant_id == membership.tenant_id`), so the queries return only the rows they name — they do
-  not rely on (or silently bypass) RLS. The tenant-scoped business services and the PDP all use
-  `tenant_session` (RLS **enforced**), and the only `app_session` (no-tenant) callers touch the global
-  `permissions` catalog. See the cross-service audit notes.
-- **The real exposure:** because RLS is intentionally off here, the missing caller-authorization is
-  the load-bearing control. A holder of any valid token could, in principle, enumerate or mutate
-  another tenant's membership/org data through these endpoints.
-- **Planned hardening:** introduce a `require_platform_admin` dependency and a
-  `require_tenant_admin(tenant_id)` dependency (caller must hold a platform-level grant, or an
-  admin role + active membership in the path tenant) and apply them to every management endpoint.
-  Tracked as future work ([§17](#17-future-evolution)); the take-home scope deliberately prioritized
-  the core decision/enforcement path over the admin surface.
+**Fixes applied:**
+1. **`require_tenant_admin`** (both services) — privileged endpoints now require a tenant-scoped access
+   token whose holder has the `tenant_admin` role. Applied to the **entire Authz PAP** (roles,
+   permissions, policies, direct grants, audit) and the **Auth management** endpoints (members, role
+   assignment, org-units, user/tenant create+list). Endpoints that name a tenant in the path also
+   assert the **path tenant == the token's tenant** (`_assert_tenant`), and role assignment additionally
+   verifies the target membership belongs to the caller's tenant — so an admin of tenant A cannot act
+   on tenant B.
+2. **`/check` subject binding** — the PDP no longer trusts a client-supplied subject on the user path.
+   A **regular member's** subject is bound to their own token (they cannot fabricate `user_id`/`roles`
+   to probe or shape decisions); a **`tenant_admin`** may still submit an arbitrary subject *pinned to
+   their own tenant* (the decision **simulator**, which grants nothing they don't already have); the
+   **service (PEP)** path is trusted, since the PEP builds the subject from a verified user token.
+3. **Admin-change auditing** — every PAP/management mutation now writes an `audit_logs` row
+   (`decision="info"`, e.g. `admin:role.grant_permission`, `admin:membership.grant_permission`,
+   `admin:member.assign_role`), so authorization changes — not just decisions — leave a forensic trail.
+
+**Residuals (still future work, §17):** a true cross-tenant **platform-admin** principal is not yet
+modeled, so the genuinely global endpoints (`create/list` of tenants and global users) are gated to
+`tenant_admin` rather than a platform role — this removes the any-member hole but is coarser than ideal.
+And because role *assignments* are carried in the access token, an admin demoting a user takes effect at
+the next token refresh (≤15 min); direct-grant and policy changes are instant via the epoch.
 
 ---
 

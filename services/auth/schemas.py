@@ -24,6 +24,13 @@ class LoginResponse(BaseModel):
     user_id: uuid.UUID
     email: EmailStr
     memberships: list[MembershipSummary]
+    # Convenience: login auto-scopes to the PRIMARY (first-joined) active membership
+    # so callers get a usable tenant-scoped token in one step. These are null only
+    # when the user has no active membership. Switch later via /auth/switch-tenant.
+    access_token: str | None = None
+    refresh_token: str | None = None
+    active_tenant_id: uuid.UUID | None = None
+    roles: list[str] = Field(default_factory=list)
 
 
 class SelectTenantRequest(BaseModel):

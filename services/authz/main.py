@@ -69,6 +69,21 @@ def require_access(authorization: str | None = Header(default=None)) -> dict:
     return claims
 
 
+def require_tenant_admin(authorization: str | None = Header(default=None)) -> dict:
+    """PAP (admin) endpoints require a tenant-scoped access token whose holder is a
+    ``tenant_admin`` of that tenant.
+
+    Closes the PAP privilege-escalation gap (docs/DESIGN.md §13.1): a regular member
+    can no longer mutate roles, permissions, policies, or direct grants. The token is
+    already bound to one tenant, and every PAP handler derives its tenant from the
+    same token, so "admin of this tenant" is exactly the right check.
+    """
+    claims = require_access(authorization)
+    if "tenant_admin" not in (claims.get("roles") or []):
+        raise HTTPException(status_code=403, detail="tenant_admin role required")
+    return claims
+
+
 def require_caller(authorization: str | None = Header(default=None)) -> dict:
     """/check may be called by a service (PEP) or a user (UI simulator)."""
     token = _bearer(authorization)
@@ -89,6 +104,23 @@ def _maybe_uuid(value) -> uuid.UUID | None:
         return None
 
 
+def _audit_admin(tid: str, actor_sub, action: str, reason: str = "",
+                 context: dict | None = None) -> None:
+    """Record a PAP/admin change in the tenant audit trail (docs/DESIGN.md §13).
+
+    Written in its own RLS-scoped transaction so role/permission/policy/direct-grant
+    changes leave a forensic trail, not just authorization *decisions*. decision is
+    tagged ``info`` (an administrative event, not an allow/deny).
+    """
+    with tenant_session(tid) as session:
+        session.add(AuditLog(
+            tenant_id=uuid.UUID(tid),
+            actor_user_id=_maybe_uuid(actor_sub),
+            action=action, decision="info", reason=reason or "",
+            context=context or {},
+        ))
+
+
 # --------------------------------------------------------------------------
 # PDP — the decision endpoint
 # --------------------------------------------------------------------------
@@ -99,16 +131,35 @@ def healthz():
 
 
 @app.post("/check", response_model=CheckResponse)
-def check(body: CheckRequest, _: dict = Depends(require_caller)):
+def check(body: CheckRequest, caller: dict = Depends(require_caller)):
     """PDP decision endpoint: evaluate RBAC + ABAC for (subject, action, resource).
 
     Returns {decision, reason, policy_id, decision_id}. Serves from the per-tenant
     decision cache on hit (keyed by the tenant authz epoch); on miss it evaluates
     under an RLS-enforced session, writes an audit record, and caches the result.
     Auth: a service (PEP) token OR a user access token (the UI simulator).
+
+    Trust boundary (docs/DESIGN.md §13):
+      * SERVICE (PEP) path — the subject was built from a verified user token, so it
+        is trusted as-is.
+      * tenant_admin (UI simulator) — may test an ARBITRARY subject, but only within
+        their own tenant (tenant is forced to the token's). An admin already holds
+        full power in their tenant, so this grants nothing new; it's the simulator.
+      * regular user — the subject is **bound to the caller's own token**; a member
+        cannot fabricate user_id/roles to probe or shape decisions for others.
     """
     subject = body.subject.model_dump()
-    tenant_id = str(body.subject.tenant_id)
+    if caller.get("type") == "service":
+        tenant_id = str(body.subject.tenant_id)
+    elif "tenant_admin" in (caller.get("roles") or []):
+        # Admin simulator: arbitrary subject, pinned to the admin's own tenant.
+        tenant_id = str(caller.get("tenant_id") or body.subject.tenant_id)
+    else:
+        # Regular user: override identity-bearing fields from the verified token.
+        subject["user_id"] = caller.get("sub", subject.get("user_id"))
+        subject["roles"] = caller.get("roles", []) or []
+        subject["org_unit_id"] = caller.get("org_unit_id")
+        tenant_id = str(caller.get("tenant_id") or body.subject.tenant_id)
     subject["tenant_id"] = tenant_id
 
     version = cache.get_tenant_version(tenant_id)
@@ -141,7 +192,7 @@ def check(body: CheckRequest, _: dict = Depends(require_caller)):
 # PAP — permission catalog (global)
 # --------------------------------------------------------------------------
 @app.post("/permissions", response_model=PermissionOut)
-def create_permission(body: CreatePermission, _: dict = Depends(require_access)):
+def create_permission(body: CreatePermission, _: dict = Depends(require_tenant_admin)):
     """Register a (service, resource, action) permission in the GLOBAL catalog.
 
     Idempotent on the triple. The catalog is tenant-independent, so this uses
@@ -165,7 +216,7 @@ def create_permission(body: CreatePermission, _: dict = Depends(require_access))
 
 
 @app.get("/permissions", response_model=list[PermissionOut])
-def list_permissions(_: dict = Depends(require_access)):
+def list_permissions(_: dict = Depends(require_tenant_admin)):
     """List the GLOBAL permission catalog. Auth: a tenant-scoped access token."""
     with app_session() as session:
         perms = session.execute(
@@ -179,7 +230,7 @@ def list_permissions(_: dict = Depends(require_access)):
 # PAP — roles (tenant-scoped)
 # --------------------------------------------------------------------------
 @app.post("/roles", response_model=RoleOut)
-def create_role(body: CreateRole, claims: dict = Depends(require_access)):
+def create_role(body: CreateRole, claims: dict = Depends(require_tenant_admin)):
     """Create a tenant-scoped role, then bump the tenant authz epoch.
 
     Tenant is taken from the token (`claims["tenant_id"]`), never the client, and
@@ -193,11 +244,12 @@ def create_role(body: CreateRole, claims: dict = Depends(require_access)):
         session.flush()
         out = RoleOut(id=role.id, name=role.name, description=role.description, is_system=role.is_system)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:role.create", out.name, {"role_id": str(out.id)})
     return out
 
 
 @app.get("/roles", response_model=list[RoleOut])
-def list_roles(claims: dict = Depends(require_access)):
+def list_roles(claims: dict = Depends(require_tenant_admin)):
     """List roles for the caller's tenant (RLS-scoped to the token's tenant)."""
     with tenant_session(claims["tenant_id"]) as session:
         roles = session.execute(select(Role).order_by(Role.name)).scalars().all()
@@ -205,7 +257,7 @@ def list_roles(claims: dict = Depends(require_access)):
 
 
 @app.get("/roles/{role_id}", response_model=RoleDetail)
-def role_detail(role_id: uuid.UUID, claims: dict = Depends(require_access)):
+def role_detail(role_id: uuid.UUID, claims: dict = Depends(require_tenant_admin)):
     """Return a role with its EFFECTIVE permissions (incl. inherited) and parents.
 
     Effective permissions are resolved via the role-hierarchy closure. RLS-scoped
@@ -229,7 +281,7 @@ def role_detail(role_id: uuid.UUID, claims: dict = Depends(require_access)):
 
 
 @app.post("/roles/{role_id}/permissions")
-def grant_permission(role_id: uuid.UUID, body: GrantPermission, claims: dict = Depends(require_access)):
+def grant_permission(role_id: uuid.UUID, body: GrantPermission, claims: dict = Depends(require_tenant_admin)):
     """Grant a catalog permission to a role (idempotent), then bump the tenant epoch.
 
     RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
@@ -249,11 +301,13 @@ def grant_permission(role_id: uuid.UUID, body: GrantPermission, claims: dict = D
             session.add(RolePermission(tenant_id=uuid.UUID(tid), role_id=role_id,
                                        permission_id=body.permission_id))
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:role.grant_permission", str(role_id),
+                 {"role_id": str(role_id), "permission_id": str(body.permission_id)})
     return {"status": "granted"}
 
 
 @app.delete("/roles/{role_id}/permissions/{permission_id}")
-def revoke_permission(role_id: uuid.UUID, permission_id: uuid.UUID, claims: dict = Depends(require_access)):
+def revoke_permission(role_id: uuid.UUID, permission_id: uuid.UUID, claims: dict = Depends(require_tenant_admin)):
     """Revoke a permission from a role, then bump the tenant epoch.
 
     RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
@@ -268,11 +322,13 @@ def revoke_permission(role_id: uuid.UUID, permission_id: uuid.UUID, claims: dict
         if link is not None:
             session.delete(link)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:role.revoke_permission", str(role_id),
+                 {"role_id": str(role_id), "permission_id": str(permission_id)})
     return {"status": "revoked"}
 
 
 @app.post("/roles/{role_id}/children")
-def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depends(require_access)):
+def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depends(require_tenant_admin)):
     """Add an inheritance edge parent->child (parent inherits child's permissions).
 
     Rejects self-inheritance; RLS-scoped to the token's tenant. Then bumps the
@@ -293,6 +349,8 @@ def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depend
             session.add(RoleHierarchy(tenant_id=uuid.UUID(tid), parent_role_id=role_id,
                                       child_role_id=body.child_role_id))
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:role.add_child", str(role_id),
+                 {"parent_role_id": str(role_id), "child_role_id": str(body.child_role_id)})
     return {"status": "linked"}
 
 
@@ -301,7 +359,7 @@ def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depend
 # --------------------------------------------------------------------------
 @app.post("/memberships/{membership_id}/permissions")
 def grant_membership_permission(membership_id: uuid.UUID, body: GrantPermission,
-                                claims: dict = Depends(require_access)):
+                                claims: dict = Depends(require_tenant_admin)):
     """Grant a permission DIRECTLY to a membership, on top of its roles.
 
     The effective set at decision time is role-derived permissions UNION these
@@ -326,12 +384,14 @@ def grant_membership_permission(membership_id: uuid.UUID, body: GrantPermission,
                 tenant_id=uuid.UUID(tid), membership_id=membership_id,
                 permission_id=body.permission_id))
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:membership.grant_permission", str(membership_id),
+                 {"membership_id": str(membership_id), "permission_id": str(body.permission_id)})
     return {"status": "granted"}
 
 
 @app.delete("/memberships/{membership_id}/permissions/{permission_id}")
 def revoke_membership_permission(membership_id: uuid.UUID, permission_id: uuid.UUID,
-                                 claims: dict = Depends(require_access)):
+                                 claims: dict = Depends(require_tenant_admin)):
     """Revoke a direct per-user permission grant, then bump the tenant epoch.
 
     RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
@@ -346,11 +406,13 @@ def revoke_membership_permission(membership_id: uuid.UUID, permission_id: uuid.U
         if link is not None:
             session.delete(link)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:membership.revoke_permission", str(membership_id),
+                 {"membership_id": str(membership_id), "permission_id": str(permission_id)})
     return {"status": "revoked"}
 
 
 @app.get("/memberships/{membership_id}/permissions", response_model=list[PermissionOut])
-def list_membership_permissions(membership_id: uuid.UUID, claims: dict = Depends(require_access)):
+def list_membership_permissions(membership_id: uuid.UUID, claims: dict = Depends(require_tenant_admin)):
     """List the DIRECT per-user permission grants for a membership (RLS-scoped)."""
     with tenant_session(claims["tenant_id"]) as session:
         perm_ids = session.execute(
@@ -368,7 +430,7 @@ def list_membership_permissions(membership_id: uuid.UUID, claims: dict = Depends
 # PAP — policies (ABAC, tenant-scoped)
 # --------------------------------------------------------------------------
 @app.post("/policies", response_model=PolicyOut)
-def create_policy(body: CreatePolicy, claims: dict = Depends(require_access)):
+def create_policy(body: CreatePolicy, claims: dict = Depends(require_tenant_admin)):
     """Create an ABAC policy (condition + allow|deny) attached to a permission.
 
     The condition DSL is structurally validated before persisting (no eval). The
@@ -393,11 +455,13 @@ def create_policy(body: CreatePolicy, claims: dict = Depends(require_access)):
                         condition=policy.condition, effect=policy.effect,
                         version=policy.version, enabled=policy.enabled)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:policy.create", out.name,
+                 {"policy_id": str(out.id), "effect": out.effect})
     return out
 
 
 @app.get("/policies", response_model=list[PolicyOut])
-def list_policies(claims: dict = Depends(require_access)):
+def list_policies(claims: dict = Depends(require_tenant_admin)):
     """List ABAC policies for the caller's tenant (RLS-scoped to the token tenant)."""
     with tenant_session(claims["tenant_id"]) as session:
         policies = session.execute(select(Policy).order_by(Policy.name)).scalars().all()
@@ -407,7 +471,7 @@ def list_policies(claims: dict = Depends(require_access)):
 
 
 @app.put("/policies/{policy_id}", response_model=PolicyOut)
-def update_policy(policy_id: uuid.UUID, body: UpdatePolicy, claims: dict = Depends(require_access)):
+def update_policy(policy_id: uuid.UUID, body: UpdatePolicy, claims: dict = Depends(require_tenant_admin)):
     """Update a policy's condition/effect/enabled; re-validates the DSL, bumps version.
 
     Increments the policy's own version and the tenant epoch (invalidating cached
@@ -435,11 +499,13 @@ def update_policy(policy_id: uuid.UUID, body: UpdatePolicy, claims: dict = Depen
                         condition=policy.condition, effect=policy.effect,
                         version=policy.version, enabled=policy.enabled)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:policy.update", out.name,
+                 {"policy_id": str(out.id), "version": out.version})
     return out
 
 
 @app.delete("/policies/{policy_id}")
-def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_access)):
+def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_tenant_admin)):
     """Delete a policy, then bump the tenant epoch.
 
     RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
@@ -450,6 +516,8 @@ def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_access)):
         if policy is not None:
             session.delete(policy)
     cache.bump_tenant_version(tid)
+    _audit_admin(tid, claims["sub"], "admin:policy.delete", str(policy_id),
+                 {"policy_id": str(policy_id)})
     return {"status": "deleted"}
 
 
@@ -457,7 +525,7 @@ def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_access)):
 # Audit (tenant-scoped)
 # --------------------------------------------------------------------------
 @app.get("/audit", response_model=list[AuditOut])
-def list_audit(limit: int = 100, claims: dict = Depends(require_access)):
+def list_audit(limit: int = 100, claims: dict = Depends(require_tenant_admin)):
     """Return the tenant's recent decision/admin audit records (newest first).
 
     RLS-scoped to the token's tenant; `limit` is capped at 500. Auth: a

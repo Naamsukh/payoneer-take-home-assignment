@@ -28,14 +28,23 @@ curl -s localhost:8001/auth/login \
   "memberships": [
     {"tenant_id": "9a22...", "tenant_name": "Acme Corp",  "membership_id": "...", "status": "active"},
     {"tenant_id": "a920...", "tenant_name": "Globex Inc", "membership_id": "...", "status": "active"}
-  ]
+  ],
+
+  // Login also AUTO-SCOPES to the primary (first-joined) active membership, so you
+  // get a usable tenant-scoped token in one call — no select-tenant step needed.
+  // For alice that is Acme Corp. (null only if the user has no active membership.)
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "xqf...",
+  "active_tenant_id": "9a22...",
+  "roles": ["tenant_admin"]
 }
 ```
 
-The identity token only authorizes `/auth/select-tenant`, `/auth/switch-tenant`,
-and `/auth/me`. Pick the active tenant to get a usable access token:
+Use `access_token` directly. The `identity_token` still authorizes the pre-tenant
+endpoints (`/auth/select-tenant`, `/auth/switch-tenant`, `/auth/me`); call
+`/auth/switch-tenant` to act in a different tenant.
 
-### Select active tenant → tenant-scoped access token
+### (Optional) Select / switch to a specific tenant → tenant-scoped access token
 ```bash
 curl -s localhost:8001/auth/select-tenant \
   -H "Authorization: Bearer $ID" \

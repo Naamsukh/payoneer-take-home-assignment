@@ -45,14 +45,15 @@ def do_login(email: str, password: str) -> None:
     S.email = data["email"]
     S.user_id = data["user_id"]
     S.memberships = data["memberships"]
-    S.access_token = None
-    S.tenant_id = None
-    S.tenant_name = None
-    S.roles = []
-    # Auto-select if exactly one active membership.
-    active = [m for m in S.memberships if m["status"] == "active"]
-    if len(active) == 1:
-        select_tenant(active[0]["tenant_id"])
+    # Login auto-scopes to the primary (first-joined) active membership and returns
+    # a usable access token directly — no separate select-tenant click needed.
+    S.access_token = data.get("access_token")
+    S.roles = data.get("roles") or []
+    S.tenant_id = str(data["active_tenant_id"]) if data.get("active_tenant_id") else None
+    S.tenant_name = next(
+        (m["tenant_name"] for m in S.memberships if str(m["tenant_id"]) == S.tenant_id),
+        None,
+    ) if S.tenant_id else None
 
 
 def select_tenant(tenant_id: str) -> None:
