@@ -36,11 +36,18 @@ def _to_out(e: Expense) -> ExpenseOut:
 
 @app.get("/healthz")
 def healthz():
+    """Liveness probe. No auth; returns the service identity."""
     return {"status": "ok", "service": "expense"}
 
 
 @app.post("/expenses", response_model=ExpenseOut)
 def create_expense(body: ExpenseCreate, principal: Principal = Depends(get_principal)):
+    """Submit an expense in the caller's tenant/org-unit.
+
+    Plain RBAC (`expense:expense:create`) enforced at the PDP via the PEP; the row
+    is written under tenant_session (RLS), stamped with the principal's tenant.
+    Auth: a tenant-scoped access token granting the create permission.
+    """
     pep.enforce(principal, ACTION("create"))
     with tenant_session(principal.tenant_id) as session:
         expense = Expense(
@@ -56,6 +63,11 @@ def create_expense(body: ExpenseCreate, principal: Principal = Depends(get_princ
 
 @app.get("/expenses", response_model=list[ExpenseOut])
 def list_expenses(principal: Principal = Depends(get_principal)):
+    """List expenses in the caller's tenant.
+
+    RBAC (`expense:expense:read`) at the PDP; results are physically limited to the
+    tenant by RLS (no explicit tenant filter needed). Auth: tenant-scoped token.
+    """
     pep.enforce(principal, ACTION("read"))
     with tenant_session(principal.tenant_id) as session:
         rows = session.execute(select(Expense).order_by(Expense.created_at.desc())).scalars().all()
@@ -64,6 +76,11 @@ def list_expenses(principal: Principal = Depends(get_principal)):
 
 @app.get("/expenses/{expense_id}", response_model=ExpenseOut)
 def get_expense(expense_id: uuid.UUID, principal: Principal = Depends(get_principal)):
+    """Fetch one expense by id (404 if absent or in another tenant).
+
+    RBAC (`expense:expense:read`) at the PDP; RLS prevents cross-tenant reads.
+    Auth: a tenant-scoped access token.
+    """
     pep.enforce(principal, ACTION("read"))
     with tenant_session(principal.tenant_id) as session:
         expense = session.get(Expense, expense_id)
@@ -74,6 +91,14 @@ def get_expense(expense_id: uuid.UUID, principal: Principal = Depends(get_princi
 
 @app.post("/expenses/{expense_id}/approve", response_model=ExpenseOut)
 def approve_expense(expense_id: uuid.UUID, principal: Principal = Depends(get_principal)):
+    """Approve an expense — the richest path: RBAC + ABAC.
+
+    Loads the resource attributes (RLS-scoped), then asks the PDP to enforce
+    `expense:expense:approve` together with the attached ABAC policies (amount
+    threshold, same org-unit, and separation of duties: approver ≠ creator), then
+    applies the approval. Auth: a tenant-scoped access token whose attributes
+    satisfy the policies.
+    """
     # 1) load resource attributes (RLS-scoped)
     with tenant_session(principal.tenant_id) as session:
         expense = session.get(Expense, expense_id)

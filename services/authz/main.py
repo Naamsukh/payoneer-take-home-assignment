@@ -92,11 +92,19 @@ def _maybe_uuid(value) -> uuid.UUID | None:
 # --------------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
+    """Liveness probe. No auth; returns the service identity."""
     return {"status": "ok", "service": "authz"}
 
 
 @app.post("/check", response_model=CheckResponse)
 def check(body: CheckRequest, _: dict = Depends(require_caller)):
+    """PDP decision endpoint: evaluate RBAC + ABAC for (subject, action, resource).
+
+    Returns {decision, reason, policy_id, decision_id}. Serves from the per-tenant
+    decision cache on hit (keyed by the tenant authz epoch); on miss it evaluates
+    under an RLS-enforced session, writes an audit record, and caches the result.
+    Auth: a service (PEP) token OR a user access token (the UI simulator).
+    """
     subject = body.subject.model_dump()
     tenant_id = str(body.subject.tenant_id)
     subject["tenant_id"] = tenant_id
@@ -132,6 +140,12 @@ def check(body: CheckRequest, _: dict = Depends(require_caller)):
 # --------------------------------------------------------------------------
 @app.post("/permissions", response_model=PermissionOut)
 def create_permission(body: CreatePermission, _: dict = Depends(require_access)):
+    """Register a (service, resource, action) permission in the GLOBAL catalog.
+
+    Idempotent on the triple. The catalog is tenant-independent, so this uses
+    app_session() (no tenant context); tenants grant subsets via roles.
+    Auth: a tenant-scoped access token.
+    """
     with app_session() as session:
         perm = session.execute(
             select(Permission).where(
@@ -150,6 +164,7 @@ def create_permission(body: CreatePermission, _: dict = Depends(require_access))
 
 @app.get("/permissions", response_model=list[PermissionOut])
 def list_permissions(_: dict = Depends(require_access)):
+    """List the GLOBAL permission catalog. Auth: a tenant-scoped access token."""
     with app_session() as session:
         perms = session.execute(
             select(Permission).order_by(Permission.service, Permission.resource, Permission.action)
@@ -163,6 +178,12 @@ def list_permissions(_: dict = Depends(require_access)):
 # --------------------------------------------------------------------------
 @app.post("/roles", response_model=RoleOut)
 def create_role(body: CreateRole, claims: dict = Depends(require_access)):
+    """Create a tenant-scoped role, then bump the tenant authz epoch.
+
+    Tenant is taken from the token (`claims["tenant_id"]`), never the client, and
+    the write runs under RLS. The epoch bump invalidates this tenant's cached
+    decisions. Auth: a tenant-scoped access token (tenant = the token's tenant).
+    """
     tid = claims["tenant_id"]
     with tenant_session(tid) as session:
         role = Role(tenant_id=uuid.UUID(tid), name=body.name, description=body.description)
@@ -175,6 +196,7 @@ def create_role(body: CreateRole, claims: dict = Depends(require_access)):
 
 @app.get("/roles", response_model=list[RoleOut])
 def list_roles(claims: dict = Depends(require_access)):
+    """List roles for the caller's tenant (RLS-scoped to the token's tenant)."""
     with tenant_session(claims["tenant_id"]) as session:
         roles = session.execute(select(Role).order_by(Role.name)).scalars().all()
         return [RoleOut(id=r.id, name=r.name, description=r.description, is_system=r.is_system) for r in roles]
@@ -182,6 +204,11 @@ def list_roles(claims: dict = Depends(require_access)):
 
 @app.get("/roles/{role_id}", response_model=RoleDetail)
 def role_detail(role_id: uuid.UUID, claims: dict = Depends(require_access)):
+    """Return a role with its EFFECTIVE permissions (incl. inherited) and parents.
+
+    Effective permissions are resolved via the role-hierarchy closure. RLS-scoped
+    to the token's tenant, so cross-tenant role ids resolve to 404.
+    """
     with tenant_session(claims["tenant_id"]) as session:
         role = session.get(Role, role_id)
         if role is None:
@@ -201,6 +228,10 @@ def role_detail(role_id: uuid.UUID, claims: dict = Depends(require_access)):
 
 @app.post("/roles/{role_id}/permissions")
 def grant_permission(role_id: uuid.UUID, body: GrantPermission, claims: dict = Depends(require_access)):
+    """Grant a catalog permission to a role (idempotent), then bump the tenant epoch.
+
+    RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     with tenant_session(tid) as session:
         if session.get(Role, role_id) is None:
@@ -221,6 +252,10 @@ def grant_permission(role_id: uuid.UUID, body: GrantPermission, claims: dict = D
 
 @app.delete("/roles/{role_id}/permissions/{permission_id}")
 def revoke_permission(role_id: uuid.UUID, permission_id: uuid.UUID, claims: dict = Depends(require_access)):
+    """Revoke a permission from a role, then bump the tenant epoch.
+
+    RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     with tenant_session(tid) as session:
         link = session.execute(
@@ -236,6 +271,11 @@ def revoke_permission(role_id: uuid.UUID, permission_id: uuid.UUID, claims: dict
 
 @app.post("/roles/{role_id}/children")
 def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depends(require_access)):
+    """Add an inheritance edge parent->child (parent inherits child's permissions).
+
+    Rejects self-inheritance; RLS-scoped to the token's tenant. Then bumps the
+    tenant epoch. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     if role_id == body.child_role_id:
         raise HTTPException(status_code=400, detail="a role cannot inherit itself")
@@ -259,6 +299,12 @@ def add_child_role(role_id: uuid.UUID, body: AddChildRole, claims: dict = Depend
 # --------------------------------------------------------------------------
 @app.post("/policies", response_model=PolicyOut)
 def create_policy(body: CreatePolicy, claims: dict = Depends(require_access)):
+    """Create an ABAC policy (condition + allow|deny) attached to a permission.
+
+    The condition DSL is structurally validated before persisting (no eval). The
+    write is RLS-scoped to the token's tenant and bumps the tenant epoch so cached
+    decisions re-evaluate. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     if body.effect not in ("allow", "deny"):
         raise HTTPException(status_code=400, detail="effect must be allow|deny")
@@ -282,6 +328,7 @@ def create_policy(body: CreatePolicy, claims: dict = Depends(require_access)):
 
 @app.get("/policies", response_model=list[PolicyOut])
 def list_policies(claims: dict = Depends(require_access)):
+    """List ABAC policies for the caller's tenant (RLS-scoped to the token tenant)."""
     with tenant_session(claims["tenant_id"]) as session:
         policies = session.execute(select(Policy).order_by(Policy.name)).scalars().all()
         return [PolicyOut(id=p.id, permission_id=p.permission_id, name=p.name,
@@ -291,6 +338,11 @@ def list_policies(claims: dict = Depends(require_access)):
 
 @app.put("/policies/{policy_id}", response_model=PolicyOut)
 def update_policy(policy_id: uuid.UUID, body: UpdatePolicy, claims: dict = Depends(require_access)):
+    """Update a policy's condition/effect/enabled; re-validates the DSL, bumps version.
+
+    Increments the policy's own version and the tenant epoch (invalidating cached
+    decisions). RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     with tenant_session(tid) as session:
         policy = session.get(Policy, policy_id)
@@ -318,6 +370,10 @@ def update_policy(policy_id: uuid.UUID, body: UpdatePolicy, claims: dict = Depen
 
 @app.delete("/policies/{policy_id}")
 def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_access)):
+    """Delete a policy, then bump the tenant epoch.
+
+    RLS-scoped to the token's tenant. Auth: a tenant-scoped access token.
+    """
     tid = claims["tenant_id"]
     with tenant_session(tid) as session:
         policy = session.get(Policy, policy_id)
@@ -332,6 +388,11 @@ def delete_policy(policy_id: uuid.UUID, claims: dict = Depends(require_access)):
 # --------------------------------------------------------------------------
 @app.get("/audit", response_model=list[AuditOut])
 def list_audit(limit: int = 100, claims: dict = Depends(require_access)):
+    """Return the tenant's recent decision/admin audit records (newest first).
+
+    RLS-scoped to the token's tenant; `limit` is capped at 500. Auth: a
+    tenant-scoped access token.
+    """
     with tenant_session(claims["tenant_id"]) as session:
         rows = session.execute(
             select(AuditLog).order_by(AuditLog.created_at.desc()).limit(min(limit, 500))

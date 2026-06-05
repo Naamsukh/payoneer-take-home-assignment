@@ -577,6 +577,34 @@ Full request/response examples live in [`docs/api-examples.md`](./api-examples.m
 - **Data isolation:** RLS guarantees tenant boundary at the storage layer.
 - **Separation of duties** modeled natively via ABAC (`creator ≠ approver`).
 
+### 13.1 Known gap — authorization on the BYPASSRLS management surface
+
+The Auth service is the **identity authority**, so it runs under the `identity_user` role which has
+**`BYPASSRLS`** — it legitimately operates *above* tenant scope (global users, a user's memberships
+spanning many tenants). Postgres RLS therefore does **not** protect this surface; protection must come
+from an explicit application-level authorization check on the caller.
+
+Today the management endpoints (`/tenants`, `/users`, `/tenants/{id}/members`,
+`/memberships/{id}/roles`, `/tenants/{id}/org-units`, …) are guarded only by `require_token`, i.e.
+*"is the caller authenticated?"* — **not** *"is the caller a platform admin, or an admin of the
+`tenant_id` in the path?"* Several of these are inherently cross-tenant (e.g. `GET /users` lists every
+user on the platform; `POST /tenants/{id}/members` targets an arbitrary tenant via the path param).
+
+- **Why it is not an isolation leak in the audited sense:** every such query is *hand-scoped* with an
+  explicit `WHERE user_id / tenant_id / membership_id` and a cross-tenant guard on role assignment
+  (`role.tenant_id == membership.tenant_id`), so the queries return only the rows they name — they do
+  not rely on (or silently bypass) RLS. The tenant-scoped business services and the PDP all use
+  `tenant_session` (RLS **enforced**), and the only `app_session` (no-tenant) callers touch the global
+  `permissions` catalog. See the cross-service audit notes.
+- **The real exposure:** because RLS is intentionally off here, the missing caller-authorization is
+  the load-bearing control. A holder of any valid token could, in principle, enumerate or mutate
+  another tenant's membership/org data through these endpoints.
+- **Planned hardening:** introduce a `require_platform_admin` dependency and a
+  `require_tenant_admin(tenant_id)` dependency (caller must hold a platform-level grant, or an
+  admin role + active membership in the path tenant) and apply them to every management endpoint.
+  Tracked as future work ([§17](#17-future-evolution)); the take-home scope deliberately prioritized
+  the core decision/enforcement path over the admin surface.
+
 ---
 
 ## 14. Operational Concerns
@@ -599,6 +627,8 @@ Full request/response examples live in [`docs/api-examples.md`](./api-examples.m
 - *vs Pure RBAC:* RBAC alone can't express "approve only if amount < 10k and same dept" — the doc explicitly requires fine-grained/policy rules. ABAC adds exactly that.
 - *vs ReBAC (Zanzibar/OpenFGA):* ReBAC is more powerful for deep relationship graphs and is the natural future evolution, but building or operating it well exceeds a 2-day budget and doesn't echo the doc's own "roles/permissions + policies" vocabulary. **Documented as the scale-up path.**
 - *vs OPA/Rego:* Externalizing to OPA is flexible and battle-tested, but pushes authorization logic into Rego files rather than a modeled, UI-manageable DB — and the assignment wants *dynamic, admin-managed* roles/policies. Our JSON DSL keeps policies as **data** (editable in the UI, versioned, auditable) instead of code.
+
+> 📄 Deep dive: [`ZANZIBAR-VS-XACML.md`](./ZANZIBAR-VS-XACML.md) — the long-form **Zanzibar (ReBAC) vs XACML (PDP/PEP + ABAC)** comparison and why we follow the XACML topology.
 
 ### 15.2 Enforcement — central PDP + cached PEP vs token-baked vs pure-central vs sidecar
 **Chosen: JWT identity + central PDP + distributed PEP with decision cache.**

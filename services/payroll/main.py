@@ -44,11 +44,18 @@ def _resource(p: Payslip) -> dict:
 
 @app.get("/healthz")
 def healthz():
+    """Liveness probe. No auth; returns the service identity."""
     return {"status": "ok", "service": "payroll"}
 
 
 @app.post("/payslips", response_model=PayslipOut)
 def create_payslip(body: PayslipCreate, principal: Principal = Depends(get_principal)):
+    """Create a payslip for an employee in the caller's tenant.
+
+    RBAC on a sensitive resource (`payroll:payslip:create`) at the PDP; written
+    under tenant_session (RLS), stamped with the principal's tenant.
+    Auth: a tenant-scoped access token granting the create permission.
+    """
     pep.enforce(principal, ACTION("create"))
     with tenant_session(principal.tenant_id) as session:
         payslip = Payslip(
@@ -64,6 +71,12 @@ def create_payslip(body: PayslipCreate, principal: Principal = Depends(get_princ
 
 @app.get("/payslips/{payslip_id}", response_model=PayslipOut)
 def get_payslip(payslip_id: uuid.UUID, principal: Principal = Depends(get_principal)):
+    """Read one payslip, enforcing self-access ABAC.
+
+    Loads the payslip (RLS-scoped), then the PDP applies `payroll:payslip:read`
+    plus the self-access policy: an employee may read only their OWN payslip, while
+    a payroll_admin may read anyone's. Auth: a tenant-scoped access token.
+    """
     with tenant_session(principal.tenant_id) as session:
         payslip = session.get(Payslip, payslip_id)
         if payslip is None:
@@ -77,7 +90,12 @@ def get_payslip(payslip_id: uuid.UUID, principal: Principal = Depends(get_princi
 
 @app.get("/payslips", response_model=list[PayslipOut])
 def list_payslips(principal: Principal = Depends(get_principal)):
-    """Per-row authorization: return only the payslips this principal may read."""
+    """List payslips with PER-ROW authorization.
+
+    Loads the tenant's payslips (RLS-scoped), then asks the PDP for a decision per
+    row and returns only those the principal may read (own payslip, or any for a
+    payroll_admin). Auth: a tenant-scoped access token.
+    """
     with tenant_session(principal.tenant_id) as session:
         rows = session.execute(select(Payslip).order_by(Payslip.period.desc())).scalars().all()
         payslips = [( _to_out(p), _resource(p)) for p in rows]
